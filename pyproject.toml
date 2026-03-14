@@ -1,0 +1,32 @@
+[project]
+name = "midnightstar"
+version = "0.1.0"
+description = "Gene-disease correlation discovery platform"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.40.0",
+    "requests>=2.31.0",
+    "networkx>=3.2",
+    "pyvis>=0.3.2",
+    "mygene>=3.2.2",
+    "torch>=2.2.0",
+    "torch-geometric>=2.5.0",
+    "pandas>=2.1.0",
+    "plotly>=5.18.0",
+    "scikit-learn>=1.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "responses>=0.25.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
