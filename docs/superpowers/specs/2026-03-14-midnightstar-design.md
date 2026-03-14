@@ -45,7 +45,7 @@ midnightstar/
 - **Streamlit** — UI framework
 - **PyTorch + PyTorch Geometric** — ML models (GNN, Transformer, VAE)
 - **NetworkX** — Graph construction and analysis
-- **streamlit-agraph** — Interactive network visualization
+- **Pyvis** — Interactive network visualization (primary), with Plotly network graphs as fallback. `streamlit-agraph` was considered but is unmaintained (last release Jan 2023). Pyvis generates standalone HTML that Streamlit renders via `st.components.v1.html()`.
 - **requests + SQLite** — API data fetching with local caching
 
 ## Data Layer
@@ -53,10 +53,13 @@ midnightstar/
 ### Common Data Structures
 
 ```python
-GeneNode(id, symbol, name, description, organism)
+GeneNode(id, ensembl_id, symbol, name, description, organism)
+DiseaseNode(id, name, description, category, source)
 Association(source_id, target_id, type, score, evidence, data_source)
 ExpressionProfile(gene_id, tissue, expression_level, sample_count)
 ```
+
+Gene symbol-to-Ensembl ID resolution is handled via the MyGene.info API (`mygene` Python package), which provides fast batch lookups. All internal identifiers use Ensembl IDs for cross-source consistency; gene symbols are stored for display.
 
 ### API Clients
 
@@ -64,10 +67,12 @@ ExpressionProfile(gene_id, tissue, expression_level, sample_count)
 |--------|--------|---------|-----|
 | `gwas_client` | GWAS Catalog (EBI) | Gene-disease associations, SNPs, p-values, study metadata | Free REST API |
 | `gtex_client` | GTEx Portal | Gene expression across 54 human tissues | Free REST API |
-| `hpa_client` | Human Protein Atlas | Protein expression, subcellular location, tissue data | Free REST API |
+| `hpa_client` | Human Protein Atlas | Protein expression, subcellular location, tissue data | Per-gene JSON endpoints (requires Ensembl ID); bulk TSV download for search/index |
 | `string_client` | STRING DB | Protein-protein interaction networks, confidence scores | Free REST API (1 req/sec limit) |
 
 All clients normalize responses into the common data structures above. The rest of the application is source-agnostic.
+
+**HPA access pattern:** Unlike the other three sources, HPA does not provide a search API. The `hpa_client` works in two modes: (1) direct gene lookup via `proteinatlas.org/{ENSEMBL_ID}.json` (requires Ensembl ID from MyGene.info resolution), and (2) a one-time bulk TSV download (`proteinatlas.org/download/proteinatlas.tsv.zip`) that gets indexed into the local SQLite cache for search/auto-suggest. The bulk file (~200MB) is downloaded on first use and refreshed monthly.
 
 ### Caching
 
@@ -78,10 +83,11 @@ All clients normalize responses into the common data structures above. The rest 
 
 ### Bulk Download
 
-- "Download All Data" button fetches from all 4 APIs in parallel (`concurrent.futures`)
+- "Download All Data" button fetches from all 4 APIs in parallel (`concurrent.futures`), with per-source rate limit enforcement (STRING requests throttled to 1/sec independent of other sources)
 - Progress bar showing per-source status
 - Pinned results persist in cache
 - Export merged dataset as CSV/JSON
+- For multi-hop queries, STRING requests are batched and queued to respect the rate limit (expected: ~5-20 STRING API calls per bulk download depending on depth)
 
 ### Graph Building
 
@@ -117,7 +123,7 @@ Entry point. Designed for users who don't know biology.
 Visual exploration of gene/disease networks.
 
 **Layout:**
-- **Network graph** (~70% of page) using `streamlit-agraph`
+- **Network graph** (~70% of page) using Pyvis (rendered via `st.components.v1.html()`)
   - Nodes colored by type (gene, protein, disease, pathway)
   - Edge thickness proportional to confidence score
   - Click a node to expand its connections
@@ -150,6 +156,7 @@ Guided ML model configuration. No code required.
 - Data summary: node count, edge count, available features
 - Feature selector: expression levels, interaction scores, variant associations
 - Train/validation/test split slider (default 80/10/10)
+- Split strategy: edge-level split for link prediction tasks (remove a percentage of known edges for validation/test). Uses timestamp-based or random edge removal to avoid message-passing leakage where training edges would inform test node embeddings.
 
 **Center — Model Configuration:**
 - Model type radio buttons: GNN, Transformer, VAE
@@ -158,7 +165,7 @@ Guided ML model configuration. No code required.
 | Model | Parameters |
 |-------|-----------|
 | GNN (PyTorch Geometric) | Layers (1-5), hidden dim (32-256), aggregation (mean/max/sum), learning rate |
-| Transformer | Heads (1-8), layers (1-6), embedding dim (64-512), learning rate |
+| Graph Transformer | Heads (1-8), layers (1-6), embedding dim (64-512), RWSE walk length k (8-24), learning rate |
 | VAE | Latent dim (8-128), encoder layers (1-4), beta (0.1-10), learning rate |
 
 - Common: epochs (10-500), batch size, early stopping toggle
@@ -173,7 +180,43 @@ Guided ML model configuration. No code required.
 **What each model discovers:**
 - **GNN** — Hidden connections in gene interaction networks (genes with similar neighborhoods)
 - **VAE** — Latent groupings (genes clustering together may share unknown pathways)
-- **Transformer** — Sequential/contextual patterns in gene relationships across tissues
+- **Graph Transformer** — Contextual patterns using attention over gene neighborhoods across tissues
+
+## ML Task Formulation
+
+### Prediction Task
+
+The primary task is **link prediction**: given a gene interaction graph with some edges removed, predict which missing edges (gene-gene or gene-disease connections) are most likely to exist. This is how the tool discovers novel correlations.
+
+**Positive examples:** Known edges from the graph (STRING interactions, GWAS associations).
+**Negative examples:** Randomly sampled node pairs that have no known connection, at a 1:1 ratio with positives.
+**Output:** A score between 0 and 1 representing the predicted probability that two nodes are connected. This is the "Predicted Score" shown in the Results Dashboard.
+
+### Per-Model Input Formulation
+
+- **GNN:** Standard message-passing on the gene interaction graph. Node features = concatenation of normalized expression vector (GTEx, 54 tissues), protein subcellular location one-hot (HPA), and GWAS association count. Edge features = source confidence score.
+- **Graph Transformer:** Uses a Graph Transformer architecture (not a sequence Transformer). Input is the same node/edge features as GNN, but attention is computed over k-hop neighborhoods rather than message-passing aggregation. Positional encoding via random-walk structural encoding (RWSE). This captures longer-range dependencies than standard GNN.
+- **VAE:** Encodes node feature vectors into a latent space. Reconstruction loss on the adjacency matrix encourages the latent space to capture structural patterns. Genes that cluster together in latent space but lack known edges are surfaced as discovery candidates.
+
+### Evaluation Metrics
+
+- **AUC-ROC** — Primary metric for link prediction quality
+- **Average Precision (AP)** — Measures ranking quality of predictions
+- **Hits@K (K=10, 50)** — Fraction of true edges ranked in the top K predictions
+- For VAE clustering: **Silhouette Score** on the latent embeddings
+
+All metrics are computed on the held-out test edges and displayed in the Training Monitor's "final metrics" section.
+
+### Model Explainability
+
+The "Why?" expandable on the Results Dashboard uses **GNNExplainer** (from PyTorch Geometric) for GNN and Graph Transformer models. GNNExplainer identifies which edges and node features most contributed to a prediction. For VAE, explanations show the nearest neighbors in latent space and their shared features. This is a v1 approach — more sophisticated methods (SHAP, attention visualization) can be added later.
+
+### Training Concurrency
+
+Streamlit runs in a single thread. Model training runs in a separate `multiprocessing.Process` to avoid blocking the UI. Communication between the training process and Streamlit uses a shared `multiprocessing.Queue`:
+- The training process pushes epoch metrics (loss, AUC) to the queue each epoch
+- The Streamlit UI polls the queue on each rerun (triggered by `st.rerun()` with a 2-second interval during training)
+- Stop button sets a shared `multiprocessing.Event` flag that the training loop checks between epochs
 
 ### 4. Results Dashboard
 
@@ -206,7 +249,7 @@ Multi-panel discovery view (2x2 grid).
 **Persistence:**
 - Save/load trained models and results to local files
 - Compare multiple model runs side-by-side
-- Export full report as HTML or PDF
+- Export full report as HTML (PDF export deferred to v2)
 
 ## Error Handling
 
