@@ -10,7 +10,15 @@ from src.utils import session
 st.title("🕸️ Network Explorer")
 
 manager = BulkDatasetManager()
-has_datasets = manager.is_downloaded("string") and manager.is_downloaded("string_aliases")
+has_any_data = any(manager.is_downloaded(s) for s in ["gwas", "gtex", "hpa", "string"])
+
+# Check if string aliases exist — if not but string is downloaded, build them automatically
+if manager.is_downloaded("string") and not manager.is_downloaded("string_aliases"):
+    with st.spinner("Building STRING gene alias index (one-time, ~25 MB download)..."):
+        try:
+            manager.build_string_alias_table()
+        except Exception as e:
+            st.warning(f"Could not build alias table: {e}. Gene name resolution may be limited.")
 
 # Data source: bulk datasets or session graph
 graph = session.get_graph()
@@ -19,7 +27,7 @@ graph = session.get_graph()
 with st.sidebar:
     st.subheader("Gene Search")
 
-    if has_datasets:
+    if has_any_data:
         gene_query = st.text_input("Enter gene symbol", placeholder="e.g., TP53, BRCA1, SP4")
         depth = st.slider("Network depth (hops)", 1, 3, 1)
         min_score_int = st.slider("Min STRING score", 0, 1000, 400, 50,
@@ -30,7 +38,7 @@ with st.sidebar:
                 graph = manager.build_graph(gene_query.upper(), depth=depth, min_score=min_score_int)
                 session.set_graph(graph)
     else:
-        st.warning("Download datasets first for local exploration.")
+        st.warning("No datasets found. Download them first.")
         if st.button("Go to Download"):
             st.switch_page("pages/0_Download.py")
 
@@ -46,10 +54,10 @@ with st.sidebar:
     layout_name = st.selectbox("Layout", list(layout_options.keys()))
 
 if graph is None or graph.number_of_nodes() == 0:
-    if has_datasets:
+    if has_any_data:
         st.info("Enter a gene symbol in the sidebar to explore its interaction network.")
     else:
-        st.warning("No data available. Go to **Download** to get the datasets first.")
+        st.warning("No datasets found in `.datasets/datasets.db`. Go to **Download** to get them.")
         if st.button("📥 Go to Download"):
             st.switch_page("pages/0_Download.py")
     st.stop()

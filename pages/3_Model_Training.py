@@ -7,14 +7,84 @@ from src.models.gnn import GNNLinkPredictor
 from src.models.graph_transformer import GraphTransformerLinkPredictor
 from src.models.vae import GraphVAE
 from src.models.trainer import Trainer, TrainConfig
+from src.data.bulk_datasets import BulkDatasetManager
 from src.utils import session
 
 st.title("⚙️ Model Training")
 
 graph = session.get_graph()
+manager = BulkDatasetManager()
+has_data = any(manager.is_downloaded(s) for s in ["gwas", "gtex", "hpa", "string"])
+
+# If no graph in session but datasets are available, let user build one
 if graph is None:
-    st.warning("No graph data loaded. Go to the **Search** page first.")
-    st.stop()
+    if has_data:
+        st.info("Build a training graph from your local datasets.")
+
+        graph_mode = st.radio(
+            "Data scope",
+            ["Full dataset (all genes)", "Single gene subgraph"],
+            help="Full dataset trains on all genes and interactions. Single gene focuses on a neighborhood.",
+        )
+
+        if graph_mode == "Full dataset (all genes)":
+            st.markdown("""
+            Merges **all 4 sources** into one graph:
+            - **Nodes:** All genes from HPA (~20K) + GWAS diseases
+            - **Edges:** STRING protein interactions + GWAS gene-disease links
+            - **Features:** GTEx expression (54 tissues) + HPA annotations
+            """)
+            full_min_score = st.select_slider(
+                "Min STRING score (higher = fewer but stronger edges)",
+                options=[400, 500, 600, 700, 800, 900],
+                value=700,
+                help="700 = high confidence (~2-3M edges), 900 = highest (~500K edges). Lower values use more memory.",
+            )
+            include_diseases = st.checkbox("Include GWAS disease nodes", value=True)
+            max_pvalue = st.select_slider(
+                "Max GWAS p-value",
+                options=[5e-4, 5e-6, 5e-8, 5e-10, 5e-20, 5e-50],
+                value=5e-8,
+            ) if include_diseases else 5e-8
+
+            if st.button("🔨 Build Full Graph", type="primary"):
+                progress_text = st.empty()
+                with st.spinner("Building full graph from all datasets..."):
+                    if not manager.is_downloaded("string_aliases"):
+                        progress_text.text("Building STRING alias index...")
+                        try:
+                            manager.build_string_alias_table()
+                        except Exception:
+                            pass
+                    graph = manager.build_full_graph(
+                        min_string_score=full_min_score,
+                        include_diseases=include_diseases,
+                        max_disease_pvalue=max_pvalue,
+                        on_progress=lambda msg: progress_text.text(msg),
+                    )
+                    session.set_graph(graph)
+                st.rerun()
+        else:
+            gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, SP4")
+            depth = st.slider("Network depth (hops)", 1, 3, 2)
+            min_score = st.slider("Min STRING score", 0, 1000, 400, 50)
+
+            if gene_input and st.button("🔨 Build Subgraph", type="primary"):
+                with st.spinner(f"Building graph for {gene_input.upper()}..."):
+                    if not manager.is_downloaded("string_aliases"):
+                        try:
+                            manager.build_string_alias_table()
+                        except Exception:
+                            pass
+                    graph = manager.build_graph(gene_input.upper(), depth=depth, min_score=min_score)
+                    session.set_graph(graph)
+                st.rerun()
+        st.stop()
+    else:
+        st.warning("No data available. Go to **Download** to get datasets first.")
+        if st.button("📥 Go to Download"):
+            st.switch_page("pages/0_Download.py")
+        st.stop()
 
 # Convert NetworkX graph to PyG Data
 def nx_to_pyg(G):

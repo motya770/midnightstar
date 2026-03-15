@@ -273,6 +273,7 @@ class BulkDatasetManager:
         result = {"gwas": [], "gtex": [], "hpa": None, "string": []}
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
+
             # GWAS
             rows = conn.execute(
                 "SELECT * FROM gwas WHERE mapped_gene LIKE ? OR reported_genes LIKE ?",
@@ -293,13 +294,33 @@ class BulkDatasetManager:
             ).fetchone()
             result["hpa"] = dict(row) if row else None
 
-            # STRING — map protein IDs back
-            rows = conn.execute(
-                """SELECT * FROM string
-                   WHERE protein1 LIKE ? OR protein2 LIKE ?""",
-                (f"%{gene_symbol}%", f"%{gene_symbol}%")
-            ).fetchall()
-            result["string"] = [dict(r) for r in rows]
+            # STRING — resolve gene symbol to protein ID via aliases
+            protein_ids = []
+            tables = [t[0] for t in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "string_aliases" in tables:
+                alias_rows = conn.execute(
+                    "SELECT DISTINCT protein_id FROM string_aliases WHERE gene_symbol = ?",
+                    (gene_symbol,)
+                ).fetchall()
+                protein_ids = [r[0] for r in alias_rows]
+
+            if protein_ids:
+                placeholders = ",".join(["?"] * len(protein_ids))
+                rows = conn.execute(
+                    f"""SELECT * FROM string
+                        WHERE protein1 IN ({placeholders}) OR protein2 IN ({placeholders})""",
+                    protein_ids + protein_ids
+                ).fetchall()
+                result["string"] = [dict(r) for r in rows]
+            else:
+                # Fallback: LIKE search (slow but works without aliases)
+                rows = conn.execute(
+                    "SELECT * FROM string WHERE protein1 LIKE ? OR protein2 LIKE ?",
+                    (f"%{gene_symbol}%", f"%{gene_symbol}%")
+                ).fetchall()
+                result["string"] = [dict(r) for r in rows]
 
         return result
 
@@ -332,25 +353,6 @@ class BulkDatasetManager:
         G = nx.Graph()
         visited_genes = set()
         genes_to_expand = {gene_symbol}
-
-        # We need a way to map STRING protein IDs to gene symbols.
-        # STRING uses "9606.ENSPXXX". We'll build a lookup from the string table itself
-        # by collecting all protein names and mapping via HPA/GTEx.
-        protein_to_gene = {}
-        gene_to_proteins = {}
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            # Build protein<->gene map from GTEx (has ensembl_id and gene_symbol)
-            rows = conn.execute("SELECT DISTINCT ensembl_id, gene_symbol FROM gtex").fetchall()
-            for r in rows:
-                # STRING protein IDs are ENSP, GTEx has ENSG. We can't directly map.
-                # Instead, we'll use gene symbols from HPA/GTEx and match STRING via LIKE.
-                pass
-
-        # For STRING matching, we'll search by gene symbol in protein IDs
-        # STRING protein IDs look like "9606.ENSP00000XXX" — not directly gene symbols.
-        # Best approach: query STRING for each gene and extract partner names from protein IDs,
-        # then resolve those via HPA table.
 
         for hop in range(depth):
             next_genes = set()
@@ -437,37 +439,186 @@ class BulkDatasetManager:
 
         return G
 
+    def build_full_graph(self, min_string_score: int = 700, include_diseases: bool = True,
+                         max_disease_pvalue: float = 5e-8, on_progress=None):
+        """Build a graph from ALL downloaded data across all sources.
+
+        Args:
+            min_string_score: Minimum STRING combined_score (0-1000). Higher = fewer but stronger edges.
+                              700 = high confidence (~2-3M edges), 900 = highest (~500K edges).
+            include_diseases: Whether to add GWAS disease nodes and gene-disease edges.
+            max_disease_pvalue: Only include GWAS associations with p-value below this threshold.
+            on_progress: Callback for progress updates.
+        """
+        import math
+        import networkx as nx
+
+        G = nx.Graph()
+
+        # Step 1: Add all genes from HPA as nodes
+        if on_progress:
+            on_progress("Loading gene nodes from HPA...")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            hpa_rows = conn.execute(
+                "SELECT gene, ensembl, gene_description, subcellular_location, "
+                "rna_tissue_specificity, tissue_expression_cluster FROM hpa"
+            ).fetchall()
+
+        gene_set = set()
+        for row in hpa_rows:
+            gene = row["gene"]
+            if not gene:
+                continue
+            gene_set.add(gene)
+            G.add_node(gene, node_type="gene", symbol=gene,
+                       name=row["gene_description"] or gene,
+                       description=row["gene_description"] or "",
+                       subcellular_location=row["subcellular_location"] or "",
+                       tissue_specificity=row["rna_tissue_specificity"] or "")
+
+        if on_progress:
+            on_progress(f"Added {len(gene_set)} gene nodes")
+
+        # Step 2: Add GTEx expression as node features
+        if on_progress:
+            on_progress("Loading GTEx expression data...")
+        with sqlite3.connect(self.db_path) as conn:
+            gtex_rows = conn.execute(
+                "SELECT gene_symbol, tissue, median_tpm FROM gtex WHERE median_tpm > 0"
+            ).fetchall()
+
+        expr_data = {}
+        for gene, tissue, tpm in gtex_rows:
+            if gene not in expr_data:
+                expr_data[gene] = {}
+            expr_data[gene][tissue] = tpm
+
+        for gene, tissues in expr_data.items():
+            if gene in G.nodes:
+                G.nodes[gene]["expression"] = tissues
+
+        if on_progress:
+            on_progress(f"Added expression for {len(expr_data)} genes across {len(set(t for ts in expr_data.values() for t in ts))} tissues")
+
+        # Step 3: Build protein-to-gene mapping
+        if on_progress:
+            on_progress("Building protein-to-gene mapping...")
+        protein_to_gene = {}
+        with sqlite3.connect(self.db_path) as conn:
+            tables = [t[0] for t in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "string_aliases" in tables:
+                alias_rows = conn.execute(
+                    "SELECT protein_id, gene_symbol FROM string_aliases"
+                ).fetchall()
+                for pid, gene in alias_rows:
+                    protein_to_gene[pid] = gene
+
+        if on_progress:
+            on_progress(f"Mapped {len(protein_to_gene)} protein IDs to gene symbols")
+
+        # Step 4: Add STRING interactions as edges
+        if on_progress:
+            on_progress(f"Loading STRING interactions (score >= {min_string_score})...")
+        with sqlite3.connect(self.db_path) as conn:
+            string_rows = conn.execute(
+                "SELECT protein1, protein2, combined_score, experimental, "
+                "database_score, textmining, coexpression "
+                "FROM string WHERE combined_score >= ?",
+                (min_string_score,)
+            ).fetchall()
+
+        edge_count = 0
+        for p1, p2, score, exp, db, tm, coex in string_rows:
+            gene1 = protein_to_gene.get(p1)
+            gene2 = protein_to_gene.get(p2)
+            if not gene1 or not gene2 or gene1 == gene2:
+                continue
+
+            # Add nodes if not already present (some genes may not be in HPA)
+            for g in (gene1, gene2):
+                if g not in G.nodes:
+                    G.add_node(g, node_type="gene", symbol=g, name=g, description="")
+
+            if not G.has_edge(gene1, gene2):
+                evidence = []
+                if exp > 0: evidence.append("experiments")
+                if db > 0: evidence.append("databases")
+                if tm > 0: evidence.append("textmining")
+                if coex > 0: evidence.append("co-expression")
+
+                G.add_edge(gene1, gene2,
+                           score=round(score / 1000.0, 4),
+                           data_source="STRING", sources=["STRING"],
+                           type="protein-protein",
+                           evidence=", ".join(evidence) or "combined")
+                edge_count += 1
+
+        if on_progress:
+            on_progress(f"Added {edge_count} STRING edges")
+
+        # Step 5: Add GWAS disease associations
+        if include_diseases:
+            if on_progress:
+                on_progress("Loading GWAS disease associations...")
+            with sqlite3.connect(self.db_path) as conn:
+                gwas_rows = conn.execute(
+                    "SELECT mapped_gene, disease_trait, pvalue FROM gwas "
+                    "WHERE pvalue IS NOT NULL AND pvalue <= ? AND mapped_gene != ''",
+                    (max_disease_pvalue,)
+                ).fetchall()
+
+            disease_edges = 0
+            seen_pairs = set()
+            for mapped_gene, disease, pvalue in gwas_rows:
+                # mapped_gene can contain multiple genes separated by " - "
+                genes = [g.strip() for g in mapped_gene.split(" - ") if g.strip()]
+                for gene in genes:
+                    if gene not in G.nodes:
+                        continue
+                    disease_id = disease.replace(" ", "_")[:60]
+                    pair = (gene, disease_id)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+
+                    if disease_id not in G.nodes:
+                        G.add_node(disease_id, node_type="disease", name=disease,
+                                   description="", id=disease_id)
+
+                    score = min(1.0, -math.log10(max(pvalue, 1e-300)) / 50)
+                    G.add_edge(gene, disease_id, score=round(score, 4),
+                               data_source="GWAS", sources=["GWAS"],
+                               type="gene-disease",
+                               evidence=f"p-value: {pvalue:.2e}")
+                    disease_edges += 1
+
+            if on_progress:
+                on_progress(f"Added {disease_edges} disease associations")
+
+        if on_progress:
+            on_progress(f"Full graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+
+        return G
+
     def _resolve_protein_to_gene(self, protein_id: str) -> str | None:
         """Resolve a STRING protein ID (9606.ENSPXXX) to a gene symbol."""
-        # Extract the ENSP part
-        ensp = protein_id.replace("9606.", "") if protein_id.startswith("9606.") else protein_id
+        if not hasattr(self, "_protein_cache"):
+            self._protein_cache = {}
+            with sqlite3.connect(self.db_path) as conn:
+                tables = [t[0] for t in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()]
+                if "string_aliases" in tables:
+                    rows = conn.execute(
+                        "SELECT protein_id, gene_symbol FROM string_aliases"
+                    ).fetchall()
+                    for pid, gene in rows:
+                        self._protein_cache[pid] = gene
 
-        # Look up in HPA via ensembl ID — but HPA has ENSG, not ENSP.
-        # Try GTEx as well. As a fallback, search STRING for interactions where
-        # this protein appears and see if any partner has a known gene symbol.
-        # For now, use a direct SQLite lookup on a protein alias table if available,
-        # or try a prefix match.
-        with sqlite3.connect(self.db_path) as conn:
-            # Try to find gene by matching ENSP to ENSG prefix pattern
-            # This won't work directly. Better: build a mapping table.
-            # Check if we have a protein_info table
-            tables = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-            table_names = [t[0] for t in tables]
-
-            if "string_aliases" in table_names:
-                row = conn.execute(
-                    "SELECT gene_symbol FROM string_aliases WHERE protein_id = ?",
-                    (protein_id,)
-                ).fetchone()
-                if row:
-                    return row[0]
-
-        # Fallback: extract from protein ID naming convention
-        # Some STRING datasets include gene names in the alias file.
-        # Without that, return None
-        return None
+        return self._protein_cache.get(protein_id)
 
     def build_string_alias_table(self, on_progress=None):
         """Download and index STRING aliases to map protein IDs to gene symbols."""
