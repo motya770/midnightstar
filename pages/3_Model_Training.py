@@ -126,8 +126,11 @@ if graph is None:
             st.rerun()
     st.stop()
 
-# Convert NetworkX graph to PyG Data
-def nx_to_pyg(G):
+# Convert NetworkX graph to PyG Data (cached to avoid recomputing on every widget change)
+@st.cache_data(show_spinner="Converting graph to training format...")
+def nx_to_pyg(_G, _graph_id):
+    """_G prefixed with _ to tell Streamlit not to hash it. _graph_id is used for cache key."""
+    G = _G
     node_list = sorted(G.nodes())
     node_to_idx = {n: i for i, n in enumerate(node_list)}
     num_nodes = len(node_list)
@@ -175,7 +178,8 @@ def nx_to_pyg(G):
     edge_index = torch.tensor([src, dst], dtype=torch.long) if src else torch.zeros((2, 0), dtype=torch.long)
     return Data(x=x, edge_index=edge_index, num_nodes=num_nodes), node_list, node_to_idx
 
-pyg_data, node_list, node_to_idx = nx_to_pyg(graph)
+graph_id = f"{graph.number_of_nodes()}_{graph.number_of_edges()}"
+pyg_data, node_list, node_to_idx = nx_to_pyg(graph, graph_id)
 in_channels = pyg_data.x.size(1)
 
 # Layout: three columns
