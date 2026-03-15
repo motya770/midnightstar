@@ -209,4 +209,5 @@ __marimo__/
 # MidnightStar
 .cache/
 .models/
+.datasets/
 .superpowers/

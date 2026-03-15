@@ -1,92 +1,67 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.data.models import GeneNode, Association, DiseaseNode, ExpressionProfile
+from src.data.models import GeneNode
 
 logger = logging.getLogger(__name__)
 
 
 class BulkDownloader:
-    """Downloads data for a list of genes from all sources in parallel."""
+    def __init__(self, gwas_client, gtex_client, hpa_client, string_client):
+        self.gwas = gwas_client
+        self.gtex = gtex_client
+        self.hpa = hpa_client
+        self.string = string_client
 
-    def __init__(self, string_client, gwas_client, gtex_client):
-        self._string = string_client
-        self._gwas = gwas_client
-        self._gtex = gtex_client
+    def download_all(self, gene: GeneNode, on_progress=None) -> dict:
+        results = {
+            "associations": [],
+            "diseases": [],
+            "expression": [],
+            "hpa_info": None,
+            "errors": [],
+        }
 
-    def download(self, genes: list[GeneNode]) -> dict:
-        """Download data for all genes. Returns dict with associations, diseases,
-        expression, and errors keys."""
-        all_associations: list[Association] = []
-        all_diseases: list[DiseaseNode] = []
-        all_expression: list[ExpressionProfile] = []
-        errors: dict[str, dict] = {}
+        def fetch_gwas():
+            assocs, diseases = self.gwas.search_gene(gene.symbol)
+            return "GWAS", {"associations": assocs, "diseases": diseases}
+
+        def fetch_gtex():
+            profiles = self.gtex.get_expression(gene.ensembl_id)
+            return "GTEx", {"expression": profiles}
+
+        def fetch_hpa():
+            info = self.hpa.get_gene_info(gene.ensembl_id)
+            return "HPA", {"hpa_info": info}
+
+        def fetch_string():
+            assocs = self.string.get_interactions(gene.symbol)
+            return "STRING", {"associations": assocs}
+
+        tasks = [fetch_gwas, fetch_gtex, fetch_hpa, fetch_string]
 
         with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {}
-            for gene in genes:
-                futures[executor.submit(self._fetch_gene, gene)] = gene
-
+            futures = {executor.submit(task): task for task in tasks}
             for future in as_completed(futures):
-                gene = futures[future]
                 try:
-                    result = future.result()
-                except Exception as exc:
-                    logger.error("Unexpected error for gene %s: %s", gene.symbol, exc)
-                    errors[gene.symbol] = {"string": exc, "gwas": exc, "gtex": exc}
-                    continue
+                    source_name, data = future.result()
+                    if on_progress:
+                        on_progress(source_name, "done")
 
-                all_associations.extend(result["associations"])
-                all_diseases.extend(result["diseases"])
-                all_expression.extend(result["expression"])
-                if result["errors"]:
-                    errors[gene.symbol] = result["errors"]
+                    if "associations" in data:
+                        results["associations"].extend(data["associations"])
+                    if "diseases" in data:
+                        results["diseases"].extend(data["diseases"])
+                    if "expression" in data:
+                        results["expression"].extend(data["expression"])
+                    if "hpa_info" in data and data["hpa_info"] is not None:
+                        results["hpa_info"] = data["hpa_info"]
 
-        return {
-            "associations": all_associations,
-            "diseases": all_diseases,
-            "expression": all_expression,
-            "errors": errors,
-        }
+                except Exception as e:
+                    logger.warning("Bulk download task failed: %s", e)
+                    task_fn = futures[future]
+                    name = task_fn.__name__.replace("fetch_", "").upper()
+                    results["errors"].append(name)
+                    if on_progress:
+                        on_progress(name, "error")
 
-    def _fetch_gene(self, gene: GeneNode) -> dict:
-        associations: list[Association] = []
-        diseases: list[DiseaseNode] = []
-        expression: list[ExpressionProfile] = []
-        gene_errors: dict[str, Exception | None] = {}
-
-        # STRING interactions
-        try:
-            string_assocs = self._string.get_interactions(gene.symbol)
-            associations.extend(string_assocs)
-            gene_errors["string"] = None
-        except Exception as exc:
-            logger.warning("STRING error for %s: %s", gene.symbol, exc)
-            gene_errors["string"] = exc
-
-        # GWAS associations and diseases
-        try:
-            gwas_assocs, gwas_diseases = self._gwas.search_gene(gene.symbol)
-            associations.extend(gwas_assocs)
-            diseases.extend(gwas_diseases)
-            gene_errors["gwas"] = None
-        except Exception as exc:
-            logger.warning("GWAS error for %s: %s", gene.symbol, exc)
-            gene_errors["gwas"] = exc
-
-        # GTEx expression
-        try:
-            expr_profiles = self._gtex.get_expression(gene.ensembl_id)
-            expression.extend(expr_profiles)
-            gene_errors["gtex"] = None
-        except Exception as exc:
-            logger.warning("GTEx error for %s: %s", gene.symbol, exc)
-            gene_errors["gtex"] = exc
-
-        # Only include errors dict if there were actual errors
-        has_errors = any(v is not None for v in gene_errors.values())
-        return {
-            "associations": associations,
-            "diseases": diseases,
-            "expression": expression,
-            "errors": gene_errors if has_errors else {},
-        }
+        return results
