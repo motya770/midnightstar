@@ -65,11 +65,14 @@ with tab_all:
         def on_progress(msg):
             progress_text.text(msg)
 
+        total_steps = 5
+
         for source_key, label, method in [
             ("gwas", "GWAS Catalog", manager.download_gwas),
             ("gtex", "GTEx", manager.download_gtex),
             ("hpa", "Human Protein Atlas", manager.download_hpa),
             ("string", "STRING", manager.download_string),
+            ("string_aliases", "STRING Gene Aliases", manager.build_string_alias_table),
         ]:
             if manager.is_downloaded(source_key):
                 with log:

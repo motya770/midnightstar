@@ -303,6 +303,213 @@ class BulkDatasetManager:
 
         return result
 
+    def get_all_gene_symbols(self) -> list[str]:
+        """Return all gene symbols present in the HPA table."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("SELECT DISTINCT gene FROM hpa WHERE gene != '' ORDER BY gene").fetchall()
+        return [r[0] for r in rows]
+
+    def get_string_protein_map(self) -> dict[str, str]:
+        """Build a mapping from STRING protein ID (9606.ENSPXXX) to gene symbol via HPA ensembl IDs."""
+        mapping = {}
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("SELECT gene, ensembl FROM hpa WHERE ensembl != ''").fetchall()
+        for gene, ensembl in rows:
+            # STRING uses 9606.ENSPXXX but we have ENSG IDs — build what we can
+            mapping[ensembl] = gene
+        return mapping
+
+    def build_graph(self, gene_symbol: str, depth: int = 1, min_score: int = 400):
+        """Build a NetworkX graph centered on a gene using local bulk data.
+
+        Args:
+            gene_symbol: Starting gene symbol
+            depth: How many hops of STRING interactions to include (1-3)
+            min_score: Minimum STRING combined_score (0-1000)
+        """
+        import networkx as nx
+
+        G = nx.Graph()
+        visited_genes = set()
+        genes_to_expand = {gene_symbol}
+
+        # We need a way to map STRING protein IDs to gene symbols.
+        # STRING uses "9606.ENSPXXX". We'll build a lookup from the string table itself
+        # by collecting all protein names and mapping via HPA/GTEx.
+        protein_to_gene = {}
+        gene_to_proteins = {}
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            # Build protein<->gene map from GTEx (has ensembl_id and gene_symbol)
+            rows = conn.execute("SELECT DISTINCT ensembl_id, gene_symbol FROM gtex").fetchall()
+            for r in rows:
+                # STRING protein IDs are ENSP, GTEx has ENSG. We can't directly map.
+                # Instead, we'll use gene symbols from HPA/GTEx and match STRING via LIKE.
+                pass
+
+        # For STRING matching, we'll search by gene symbol in protein IDs
+        # STRING protein IDs look like "9606.ENSP00000XXX" — not directly gene symbols.
+        # Best approach: query STRING for each gene and extract partner names from protein IDs,
+        # then resolve those via HPA table.
+
+        for hop in range(depth):
+            next_genes = set()
+            for gene in genes_to_expand:
+                if gene in visited_genes:
+                    continue
+                visited_genes.add(gene)
+
+                data = self.query_gene(gene)
+
+                # Add gene node
+                hpa = data["hpa"]
+                G.add_node(gene, node_type="gene", symbol=gene,
+                           name=hpa.get("gene_description", gene) if hpa else gene,
+                           description=hpa.get("gene_description", "") if hpa else "")
+
+                # Add expression data
+                if data["gtex"]:
+                    expr = {r["tissue"]: r["median_tpm"] for r in data["gtex"]}
+                    G.nodes[gene]["expression"] = expr
+
+                # Add HPA info
+                if hpa:
+                    G.nodes[gene]["subcellular_location"] = hpa.get("subcellular_location", "")
+                    G.nodes[gene]["tissue_specificity"] = hpa.get("rna_tissue_specificity", "")
+
+                # Add GWAS disease associations
+                seen_diseases = set()
+                for assoc in data["gwas"]:
+                    disease = assoc.get("disease_trait", "")
+                    if not disease or disease in seen_diseases:
+                        continue
+                    seen_diseases.add(disease)
+                    disease_id = disease.replace(" ", "_")[:50]
+                    if disease_id not in G.nodes:
+                        G.add_node(disease_id, node_type="disease", name=disease,
+                                   description="", id=disease_id)
+                    pvalue = assoc.get("pvalue")
+                    score = 0.5
+                    if pvalue and pvalue > 0:
+                        import math
+                        score = min(1.0, -math.log10(pvalue) / 50)
+                    if not G.has_edge(gene, disease_id):
+                        G.add_edge(gene, disease_id, score=round(score, 4),
+                                   data_source="GWAS", sources=["GWAS"],
+                                   type="gene-disease",
+                                   evidence=f"p-value: {pvalue:.2e}" if pvalue else "GWAS")
+
+                # Add STRING interactions
+                for interaction in data["string"]:
+                    combined = interaction.get("combined_score", 0)
+                    if combined < min_score:
+                        continue
+                    p1 = interaction["protein1"]
+                    p2 = interaction["protein2"]
+                    # Resolve protein IDs to gene symbols via HPA
+                    partner_protein = p2 if gene.upper() in p1.upper() else p1
+                    partner_gene = self._resolve_protein_to_gene(partner_protein)
+                    if not partner_gene or partner_gene == gene:
+                        continue
+
+                    if partner_gene not in G.nodes:
+                        G.add_node(partner_gene, node_type="gene", symbol=partner_gene,
+                                   name=partner_gene, description="")
+                    score = combined / 1000.0
+                    evidence_parts = []
+                    if interaction.get("experimental", 0) > 0:
+                        evidence_parts.append("experiments")
+                    if interaction.get("database_score", 0) > 0:
+                        evidence_parts.append("databases")
+                    if interaction.get("textmining", 0) > 0:
+                        evidence_parts.append("textmining")
+                    if interaction.get("coexpression", 0) > 0:
+                        evidence_parts.append("co-expression")
+
+                    if not G.has_edge(gene, partner_gene):
+                        G.add_edge(gene, partner_gene,
+                                   score=round(score, 4), data_source="STRING",
+                                   sources=["STRING"], type="protein-protein",
+                                   evidence=", ".join(evidence_parts) or "combined")
+                    next_genes.add(partner_gene)
+
+            genes_to_expand = next_genes - visited_genes
+
+        return G
+
+    def _resolve_protein_to_gene(self, protein_id: str) -> str | None:
+        """Resolve a STRING protein ID (9606.ENSPXXX) to a gene symbol."""
+        # Extract the ENSP part
+        ensp = protein_id.replace("9606.", "") if protein_id.startswith("9606.") else protein_id
+
+        # Look up in HPA via ensembl ID — but HPA has ENSG, not ENSP.
+        # Try GTEx as well. As a fallback, search STRING for interactions where
+        # this protein appears and see if any partner has a known gene symbol.
+        # For now, use a direct SQLite lookup on a protein alias table if available,
+        # or try a prefix match.
+        with sqlite3.connect(self.db_path) as conn:
+            # Try to find gene by matching ENSP to ENSG prefix pattern
+            # This won't work directly. Better: build a mapping table.
+            # Check if we have a protein_info table
+            tables = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            table_names = [t[0] for t in tables]
+
+            if "string_aliases" in table_names:
+                row = conn.execute(
+                    "SELECT gene_symbol FROM string_aliases WHERE protein_id = ?",
+                    (protein_id,)
+                ).fetchone()
+                if row:
+                    return row[0]
+
+        # Fallback: extract from protein ID naming convention
+        # Some STRING datasets include gene names in the alias file.
+        # Without that, return None
+        return None
+
+    def build_string_alias_table(self, on_progress=None):
+        """Download and index STRING aliases to map protein IDs to gene symbols."""
+        url = "https://stringdb-downloads.org/download/protein.aliases.v12.0/9606.protein.aliases.v12.0.txt.gz"
+        if on_progress:
+            on_progress("Downloading STRING aliases (~25 MB)...")
+        raw = self._download_file(url, on_progress)
+        if on_progress:
+            on_progress("Indexing STRING aliases...")
+
+        text = gzip.decompress(raw).decode("utf-8")
+        lines = text.strip().split("\n")
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS string_aliases (
+                    protein_id TEXT,
+                    gene_symbol TEXT,
+                    source TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_protein ON string_aliases(protein_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_gene ON string_aliases(gene_symbol)")
+            conn.execute("DELETE FROM string_aliases")
+
+            rows = []
+            for line in lines[1:]:
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+                protein_id = parts[0]
+                alias = parts[1]
+                source = parts[2]
+                # Keep BioMart_HUGO and Ensembl_HGNC entries as gene symbols
+                if "HGNC" in source or "BioMart_HUGO" in source or source == "Ensembl_gene":
+                    rows.append((protein_id, alias, source))
+
+            conn.executemany("INSERT INTO string_aliases VALUES (?,?,?)", rows)
+
+        self._set_status("string_aliases", "complete", len(rows))
+        return len(rows)
+
     def _download_file(self, url: str, on_progress=None) -> bytes:
         resp = requests.get(url, timeout=600, stream=True)
         resp.raise_for_status()
