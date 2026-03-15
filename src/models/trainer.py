@@ -1,6 +1,6 @@
 # src/models/trainer.py
-from dataclasses import dataclass, field
-from typing import Dict, List, Any
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -12,39 +12,44 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 @dataclass
 class TrainConfig:
     epochs: int = 100
-    lr: float = 1e-3
-    patience: int = 10
+    lr: float = 0.001
+    batch_size: int = 64
+    train_ratio: float = 0.8
     val_ratio: float = 0.1
-    test_ratio: float = 0.1
+    early_stopping: bool = False
+    patience: int = 10
 
 
 class Trainer:
     def __init__(self, model: nn.Module, config: TrainConfig):
         self.model = model
         self.config = config
-        self._is_vae = hasattr(model, "loss") and callable(getattr(model, "loss"))
+        self._is_vae = hasattr(model, "loss") and hasattr(model, "predict_links")
         self.optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+        self._train_data = None
+        self._val_data = None
+        self._test_data = None
 
     def _split_data(self, data):
+        test_ratio = max(0.01, 1.0 - self.config.train_ratio - self.config.val_ratio)
         transform = RandomLinkSplit(
             num_val=self.config.val_ratio,
-            num_test=self.config.test_ratio,
+            num_test=test_ratio,
             add_negative_train_samples=False,
         )
-        return transform(data)
+        self._train_data, self._val_data, self._test_data = transform(data)
 
-    def _train_step(self, train_data) -> float:
+    def _train_step(self) -> float:
         self.model.train()
         self.optimizer.zero_grad()
+        train_data = self._train_data
 
         if self._is_vae:
             loss = self.model.loss(train_data.x, train_data.edge_index)
         else:
-            # Positive edges from edge_label_index
             pos_edge = train_data.edge_label_index
             pos_src, pos_dst = pos_edge[0], pos_edge[1]
 
-            # Sample negatives
             neg_edge = negative_sampling(
                 edge_index=train_data.edge_index,
                 num_nodes=train_data.num_nodes,
@@ -66,56 +71,70 @@ class Trainer:
         self.optimizer.step()
         return loss.item()
 
-    def _val_loss(self, val_data) -> float:
+    def _eval_auc(self, split_data) -> float:
         self.model.eval()
         with torch.no_grad():
+            edge_label_index = split_data.edge_label_index
+            src, dst = edge_label_index[0], edge_label_index[1]
+            labels = split_data.edge_label.float().numpy()
+
             if self._is_vae:
-                return self.model.loss(val_data.x, val_data.edge_index).item()
+                scores = self.model.predict_links(split_data.x, split_data.edge_index, src, dst).numpy()
             else:
-                edge_label_index = val_data.edge_label_index
-                src, dst = edge_label_index[0], edge_label_index[1]
-                labels = val_data.edge_label.float()
-                preds = self.model(val_data, src, dst)
-                return nn.functional.binary_cross_entropy(preds, labels).item()
+                scores = self.model(split_data, src, dst).numpy()
 
-    def train(self, data) -> List[Dict[str, Any]]:
-        train_data, val_data, _ = self._split_data(data)
+        if len(set(labels)) < 2:
+            return 0.5
+        try:
+            return float(roc_auc_score(labels, scores))
+        except ValueError:
+            return 0.5
 
-        history: List[Dict[str, Any]] = []
-        best_val_loss = float("inf")
+    def train(self, data, on_epoch=None) -> dict:
+        self._split_data(data)
+
+        history = {"train_loss": [], "val_auc": []}
+        best_val = 0.0
         patience_counter = 0
 
         for epoch in range(self.config.epochs):
-            train_loss = self._train_step(train_data)
-            val_loss = self._val_loss(val_data)
-            history.append({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss})
+            train_loss = self._train_step()
+            val_auc = self._eval_auc(self._val_data)
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= self.config.patience:
-                    break
+            history["train_loss"].append(train_loss)
+            history["val_auc"].append(val_auc)
+
+            if on_epoch:
+                on_epoch(epoch, train_loss, val_auc)
+
+            if self.config.early_stopping:
+                if val_auc > best_val:
+                    best_val = val_auc
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.config.patience:
+                        break
 
         return history
 
-    def evaluate(self, data) -> Dict[str, float]:
-        _, _, test_data = self._split_data(data)
+    def evaluate(self, data) -> dict[str, float]:
+        if self._test_data is None:
+            self._split_data(data)
+
         self.model.eval()
         with torch.no_grad():
-            if self._is_vae:
-                edge_label_index = test_data.edge_label_index
-                src, dst = edge_label_index[0], edge_label_index[1]
-                labels = test_data.edge_label.float().numpy()
-                scores = self.model.predict_links(test_data.x, test_data.edge_index, src, dst).numpy()
-            else:
-                edge_label_index = test_data.edge_label_index
-                src, dst = edge_label_index[0], edge_label_index[1]
-                labels = test_data.edge_label.float().numpy()
-                scores = self.model(test_data, src, dst).numpy()
+            edge_label_index = self._test_data.edge_label_index
+            src, dst = edge_label_index[0], edge_label_index[1]
+            labels = self._test_data.edge_label.float().numpy()
 
-        # Guard against degenerate label sets (all same class)
+            if self._is_vae:
+                scores = self.model.predict_links(
+                    self._test_data.x, self._test_data.edge_index, src, dst
+                ).numpy()
+            else:
+                scores = self.model(self._test_data, src, dst).numpy()
+
         if len(set(labels)) < 2:
             return {"auc_roc": 0.5, "avg_precision": float(labels.mean())}
 
