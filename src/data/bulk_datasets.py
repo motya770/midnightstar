@@ -685,6 +685,63 @@ class BulkDatasetManager:
                 (source, status, datetime.datetime.now().isoformat(), row_count),
             )
 
+    def save_graph(self, graph, name: str):
+        """Save a NetworkX graph to the data directory."""
+        import pickle
+        graphs_dir = os.path.join(self.data_dir, "graphs")
+        os.makedirs(graphs_dir, exist_ok=True)
+        path = os.path.join(graphs_dir, f"{name}.gpickle")
+        with open(path, "wb") as f:
+            pickle.dump(graph, f)
+        # Store metadata
+        import datetime
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS saved_graphs (
+                    name TEXT PRIMARY KEY,
+                    nodes INTEGER,
+                    edges INTEGER,
+                    created_at TEXT,
+                    file_path TEXT
+                )
+            """)
+            conn.execute(
+                "INSERT OR REPLACE INTO saved_graphs VALUES (?,?,?,?,?)",
+                (name, graph.number_of_nodes(), graph.number_of_edges(),
+                 datetime.datetime.now().isoformat(), path),
+            )
+
+    def load_graph(self, name: str):
+        """Load a saved NetworkX graph by name."""
+        import pickle
+        path = os.path.join(self.data_dir, "graphs", f"{name}.gpickle")
+        if not os.path.exists(path):
+            return None
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+    def list_saved_graphs(self) -> list[dict]:
+        """List all saved graphs with metadata."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            tables = [t[0] for t in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "saved_graphs" not in tables:
+                return []
+            rows = conn.execute(
+                "SELECT name, nodes, edges, created_at FROM saved_graphs ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_graph(self, name: str):
+        """Delete a saved graph."""
+        path = os.path.join(self.data_dir, "graphs", f"{name}.gpickle")
+        if os.path.exists(path):
+            os.remove(path)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM saved_graphs WHERE name = ?", (name,))
+
     def db_size_mb(self) -> float:
         if not os.path.exists(self.db_path):
             return 0.0

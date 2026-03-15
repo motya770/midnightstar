@@ -16,75 +16,115 @@ graph = session.get_graph()
 manager = BulkDatasetManager()
 has_data = any(manager.is_downloaded(s) for s in ["gwas", "gtex", "hpa", "string"])
 
-# If no graph in session but datasets are available, let user build one
+# If no graph in session but datasets are available, let user build or load one
 if graph is None:
-    if has_data:
-        st.info("Build a training graph from your local datasets.")
-
-        graph_mode = st.radio(
-            "Data scope",
-            ["Full dataset (all genes)", "Single gene subgraph"],
-            help="Full dataset trains on all genes and interactions. Single gene focuses on a neighborhood.",
-        )
-
-        if graph_mode == "Full dataset (all genes)":
-            st.markdown("""
-            Merges **all 4 sources** into one graph:
-            - **Nodes:** All genes from HPA (~20K) + GWAS diseases
-            - **Edges:** STRING protein interactions + GWAS gene-disease links
-            - **Features:** GTEx expression (54 tissues) + HPA annotations
-            """)
-            full_min_score = st.select_slider(
-                "Min STRING score (higher = fewer but stronger edges)",
-                options=[400, 500, 600, 700, 800, 900],
-                value=700,
-                help="700 = high confidence (~2-3M edges), 900 = highest (~500K edges). Lower values use more memory.",
-            )
-            include_diseases = st.checkbox("Include GWAS disease nodes", value=True)
-            max_pvalue = st.select_slider(
-                "Max GWAS p-value",
-                options=[5e-4, 5e-6, 5e-8, 5e-10, 5e-20, 5e-50],
-                value=5e-8,
-            ) if include_diseases else 5e-8
-
-            if st.button("🔨 Build Full Graph", type="primary"):
-                progress_text = st.empty()
-                with st.spinner("Building full graph from all datasets..."):
-                    if not manager.is_downloaded("string_aliases"):
-                        progress_text.text("Building STRING alias index...")
-                        try:
-                            manager.build_string_alias_table()
-                        except Exception:
-                            pass
-                    graph = manager.build_full_graph(
-                        min_string_score=full_min_score,
-                        include_diseases=include_diseases,
-                        max_disease_pvalue=max_pvalue,
-                        on_progress=lambda msg: progress_text.text(msg),
-                    )
-                    session.set_graph(graph)
-                st.rerun()
-        else:
-            gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, SP4")
-            depth = st.slider("Network depth (hops)", 1, 3, 2)
-            min_score = st.slider("Min STRING score", 0, 1000, 400, 50)
-
-            if gene_input and st.button("🔨 Build Subgraph", type="primary"):
-                with st.spinner(f"Building graph for {gene_input.upper()}..."):
-                    if not manager.is_downloaded("string_aliases"):
-                        try:
-                            manager.build_string_alias_table()
-                        except Exception:
-                            pass
-                    graph = manager.build_graph(gene_input.upper(), depth=depth, min_score=min_score)
-                    session.set_graph(graph)
-                st.rerun()
-        st.stop()
-    else:
+    if not has_data:
         st.warning("No data available. Go to **Download** to get datasets first.")
         if st.button("📥 Go to Download"):
             st.switch_page("pages/0_Download.py")
         st.stop()
+
+    # Show saved graphs first
+    saved_graphs = manager.list_saved_graphs()
+    if saved_graphs:
+        st.subheader("📂 Saved Graphs")
+        for sg in saved_graphs:
+            col_info, col_load, col_del = st.columns([5, 1, 1])
+            with col_info:
+                st.markdown(
+                    f"**{sg['name']}** — {sg['nodes']:,} nodes, {sg['edges']:,} edges "
+                    f"({sg['created_at'][:16]})"
+                )
+            with col_load:
+                if st.button("Load", key=f"load_{sg['name']}"):
+                    with st.spinner(f"Loading {sg['name']}..."):
+                        graph = manager.load_graph(sg["name"])
+                        if graph:
+                            session.set_graph(graph)
+                            st.rerun()
+                        else:
+                            st.error("Graph file not found.")
+            with col_del:
+                if st.button("🗑️", key=f"del_{sg['name']}"):
+                    manager.delete_graph(sg["name"])
+                    st.rerun()
+        st.divider()
+
+    # Build new graph
+    st.subheader("🔨 Build New Graph")
+
+    graph_mode = st.radio(
+        "Data scope",
+        ["Full dataset (all genes)", "Single gene subgraph"],
+        help="Full dataset trains on all genes and interactions. Single gene focuses on a neighborhood.",
+    )
+
+    graph_name = st.text_input("Graph name (for saving)", placeholder="e.g., full_score700, tp53_depth2")
+
+    if graph_mode == "Full dataset (all genes)":
+        st.markdown("""
+        Merges **all 4 sources** into one graph:
+        - **Nodes:** All genes from HPA (~20K) + GWAS diseases
+        - **Edges:** STRING protein interactions + GWAS gene-disease links
+        - **Features:** GTEx expression (54 tissues) + HPA annotations
+        """)
+        full_min_score = st.select_slider(
+            "Min STRING score (higher = fewer but stronger edges)",
+            options=[400, 500, 600, 700, 800, 900],
+            value=700,
+            help="700 = high confidence (~470K edges), 900 = highest (~200K edges). Lower values use more memory.",
+        )
+        include_diseases = st.checkbox("Include GWAS disease nodes", value=True)
+        max_pvalue = st.select_slider(
+            "Max GWAS p-value",
+            options=[5e-4, 5e-6, 5e-8, 5e-10, 5e-20, 5e-50],
+            value=5e-8,
+        ) if include_diseases else 5e-8
+
+        # Auto-generate name if not provided
+        if not graph_name:
+            graph_name = f"full_s{full_min_score}{'_diseases' if include_diseases else ''}"
+
+        if st.button("🔨 Build Full Graph", type="primary"):
+            progress_text = st.empty()
+            with st.spinner("Building full graph from all datasets..."):
+                if not manager.is_downloaded("string_aliases"):
+                    progress_text.text("Building STRING alias index...")
+                    try:
+                        manager.build_string_alias_table()
+                    except Exception:
+                        pass
+                graph = manager.build_full_graph(
+                    min_string_score=full_min_score,
+                    include_diseases=include_diseases,
+                    max_disease_pvalue=max_pvalue,
+                    on_progress=lambda msg: progress_text.text(msg),
+                )
+                session.set_graph(graph)
+                manager.save_graph(graph, graph_name)
+                progress_text.text(f"Graph saved as '{graph_name}'")
+            st.rerun()
+    else:
+        gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, SP4")
+        depth = st.slider("Network depth (hops)", 1, 3, 2)
+        min_score = st.slider("Min STRING score", 0, 1000, 400, 50)
+
+        if not graph_name and gene_input:
+            graph_name = f"{gene_input.upper()}_d{depth}_s{min_score}"
+
+        if gene_input and st.button("🔨 Build Subgraph", type="primary"):
+            with st.spinner(f"Building graph for {gene_input.upper()}..."):
+                if not manager.is_downloaded("string_aliases"):
+                    try:
+                        manager.build_string_alias_table()
+                    except Exception:
+                        pass
+                graph = manager.build_graph(gene_input.upper(), depth=depth, min_score=min_score)
+                session.set_graph(graph)
+                if graph_name:
+                    manager.save_graph(graph, graph_name)
+            st.rerun()
+    st.stop()
 
 # Convert NetworkX graph to PyG Data
 def nx_to_pyg(G):
@@ -201,6 +241,29 @@ with col_monitor:
             val_ratio=val_ratio, early_stopping=early_stop,
         )
         trainer = Trainer(model, config)
+
+        # Print training params
+        st.markdown("**Training started**")
+        param_cols = st.columns(4)
+        param_cols[0].metric("Model", model_type)
+        param_cols[1].metric("Nodes", f"{pyg_data.num_nodes:,}")
+        param_cols[2].metric("Edges", f"{pyg_data.edge_index.size(1) // 2:,}")
+        param_cols[3].metric("Features", in_channels)
+
+        if model_type == "GNN":
+            st.code(f"GNN(layers={num_layers}, hidden={hidden_dim}, aggr={aggr}, lr={lr}, epochs={epochs}, "
+                    f"train={train_ratio}, val={val_ratio}, early_stop={early_stop})", language=None)
+        elif model_type == "Graph Transformer":
+            st.code(f"GraphTransformer(layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, "
+                    f"rwse_k={rwse_k}, lr={lr}, epochs={epochs}, train={train_ratio}, val={val_ratio}, "
+                    f"early_stop={early_stop})", language=None)
+        else:
+            st.code(f"VAE(layers={num_layers}, hidden={hidden_dim}, latent={latent_dim}, beta={beta}, "
+                    f"lr={lr}, epochs={epochs}, train={train_ratio}, val={val_ratio}, "
+                    f"early_stop={early_stop})", language=None)
+
+        total_params = sum(p.numel() for p in model.parameters())
+        st.caption(f"Model parameters: {total_params:,}")
 
         progress_bar = st.progress(0)
         loss_chart = st.empty()
