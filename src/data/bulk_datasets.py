@@ -90,6 +90,22 @@ class BulkDatasetManager:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_string_p2 ON string(protein2)")
 
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS alphafold (
+                    uniprot_id TEXT PRIMARY KEY,
+                    gene TEXT,
+                    mean_plddt REAL,
+                    frac_very_high REAL,
+                    frac_confident REAL,
+                    frac_low REAL,
+                    frac_very_low REAL,
+                    sequence_length INTEGER,
+                    disordered_fraction REAL,
+                    pdb_url TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_af_gene ON alphafold(gene)")
+
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS download_status (
                     source TEXT PRIMARY KEY,
                     status TEXT,
@@ -251,6 +267,129 @@ class BulkDatasetManager:
         self._set_status("string", "complete", len(rows))
         return len(rows)
 
+    def download_alphafold(self, on_progress=None) -> int:
+        """Download AlphaFold structural features for all human genes.
+
+        Strategy:
+        1. Download UniProt human ID mapping file (gene name → UniProt ID)
+        2. Query AlphaFold prediction API per UniProt ID
+        """
+        if on_progress:
+            on_progress("Step 1/3: Downloading UniProt ID mapping for human proteome...")
+
+        # Download the UniProt human gene-to-accession mapping via the tab file
+        # This is a small file (~2MB) that maps gene names to UniProt accessions
+        try:
+            resp = requests.get(
+                "https://rest.uniprot.org/uniprotkb/stream",
+                params={
+                    "query": "organism_id:9606 AND reviewed:true",
+                    "format": "tsv",
+                    "fields": "accession,gene_primary",
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            if on_progress:
+                on_progress(f"Failed to download UniProt mapping: {e}")
+            return 0
+
+        # Parse TSV: columns are "Entry" and "Gene Names (primary)"
+        lines = resp.text.strip().split("\n")
+        gene_to_uniprot = {}
+        for line in lines[1:]:  # skip header
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                uniprot_id = parts[0].strip()
+                gene_name = parts[1].strip()
+                if gene_name and uniprot_id:
+                    gene_to_uniprot[gene_name] = uniprot_id
+
+        if on_progress:
+            on_progress(f"Mapped {len(gene_to_uniprot)} human genes to UniProt IDs")
+
+        # Get our HPA gene list
+        with sqlite3.connect(self.db_path) as conn:
+            hpa_genes = conn.execute("SELECT DISTINCT gene FROM hpa WHERE gene != ''").fetchall()
+        hpa_gene_set = {r[0] for r in hpa_genes}
+
+        # Find overlap
+        genes_with_uniprot = []
+        for gene in hpa_gene_set:
+            uid = gene_to_uniprot.get(gene)
+            if uid:
+                genes_with_uniprot.append((gene, uid))
+
+        if on_progress:
+            on_progress(f"Found UniProt IDs for {len(genes_with_uniprot)} / {len(hpa_gene_set)} HPA genes")
+
+        # Step 2: Query AlphaFold for each UniProt ID
+        if on_progress:
+            on_progress("Step 2/3: Fetching AlphaFold predictions...")
+
+        rows = []
+        failed = 0
+        total = len(genes_with_uniprot)
+
+        for i, (gene_name, uniprot_id) in enumerate(genes_with_uniprot):
+            if on_progress and i % 100 == 0:
+                on_progress(f"AlphaFold: {i}/{total} ({len(rows)} OK, {failed} failed)")
+
+            try:
+                resp = requests.get(
+                    f"https://alphafold.ebi.ac.uk/api/prediction/{uniprot_id}",
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    failed += 1
+                    continue
+                data = resp.json()
+                pred = data[0] if isinstance(data, list) and data else data
+                if not pred:
+                    failed += 1
+                    continue
+
+                rows.append((
+                    uniprot_id,
+                    gene_name,
+                    pred.get("globalMetricValue", 0.0),
+                    pred.get("fractionPlddtVeryHigh", 0.0),
+                    pred.get("fractionPlddtConfident", 0.0),
+                    pred.get("fractionPlddtLow", 0.0),
+                    pred.get("fractionPlddtVeryLow", 0.0),
+                    (pred.get("sequenceEnd", 0) or 0) - (pred.get("sequenceStart", 0) or 0) + 1,
+                    pred.get("fractionPlddtVeryLow", 0.0) + pred.get("fractionPlddtLow", 0.0),
+                    pred.get("pdbUrl", ""),
+                ))
+            except Exception:
+                failed += 1
+
+            # Save progress every 1000 rows
+            if len(rows) > 0 and len(rows) % 1000 == 0:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO alphafold VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        rows[-1000:]
+                    )
+                if on_progress:
+                    on_progress(f"Checkpoint: {len(rows)} saved...")
+
+        # Step 3: Final save
+        if on_progress:
+            on_progress("Step 3/3: Saving to database...")
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM alphafold")
+            if rows:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO alphafold VALUES (?,?,?,?,?,?,?,?,?,?)", rows
+                )
+        self._set_status("alphafold", "complete", len(rows))
+        if on_progress:
+            on_progress(f"AlphaFold done: {len(rows)} genes indexed, {failed} failed")
+        return len(rows)
+
     def download_all(self, on_progress=None) -> dict[str, int]:
         results = {}
         for source, method in [
@@ -270,7 +409,7 @@ class BulkDatasetManager:
 
     def query_gene(self, gene_symbol: str) -> dict:
         """Query all downloaded datasets for a gene."""
-        result = {"gwas": [], "gtex": [], "hpa": None, "string": []}
+        result = {"gwas": [], "gtex": [], "hpa": None, "string": [], "alphafold": None}
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
 
@@ -321,6 +460,13 @@ class BulkDatasetManager:
                     (f"%{gene_symbol}%", f"%{gene_symbol}%")
                 ).fetchall()
                 result["string"] = [dict(r) for r in rows]
+
+            # AlphaFold
+            if "alphafold" in tables:
+                af_row = conn.execute(
+                    "SELECT * FROM alphafold WHERE gene = ?", (gene_symbol,)
+                ).fetchone()
+                result["alphafold"] = dict(af_row) if af_row else None
 
         return result
 
@@ -500,6 +646,30 @@ class BulkDatasetManager:
 
         if on_progress:
             on_progress(f"Added expression for {len(expr_data)} genes across {len(set(t for ts in expr_data.values() for t in ts))} tissues")
+
+        # Step 2b: Add AlphaFold structural features
+        with sqlite3.connect(self.db_path) as conn:
+            tables = [t[0] for t in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "alphafold" in tables:
+                if on_progress:
+                    on_progress("Loading AlphaFold structural features...")
+                af_rows = conn.execute(
+                    "SELECT gene, mean_plddt, frac_very_high, frac_very_low, "
+                    "sequence_length, disordered_fraction FROM alphafold"
+                ).fetchall()
+                af_count = 0
+                for gene, plddt, fvh, fvl, seqlen, disorder in af_rows:
+                    if gene in G.nodes:
+                        G.nodes[gene]["mean_plddt"] = plddt
+                        G.nodes[gene]["frac_plddt_high"] = fvh
+                        G.nodes[gene]["frac_plddt_low"] = fvl
+                        G.nodes[gene]["sequence_length"] = seqlen
+                        G.nodes[gene]["disordered_fraction"] = disorder
+                        af_count += 1
+                if on_progress:
+                    on_progress(f"Added AlphaFold features for {af_count} genes")
 
         # Step 3: Build protein-to-gene mapping
         if on_progress:

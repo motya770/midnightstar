@@ -142,29 +142,43 @@ def nx_to_pyg(_G, _graph_id):
         all_tissues.update(expr.keys())
     all_tissues = sorted(all_tissues)
 
-    # Feature vector: [expression_per_tissue..., degree, is_gene, is_disease]
-    num_features = max(len(all_tissues), 1) + 3
+    # Feature vector: [expression_per_tissue..., plddt, disorder, seq_len, degree, is_gene, is_disease]
+    # AlphaFold features: mean_plddt, disordered_fraction, sequence_length (3 features)
+    has_alphafold = any(G.nodes[n].get("mean_plddt") is not None for n in node_list)
+    af_features = 3 if has_alphafold else 0
+    num_features = max(len(all_tissues), 1) + af_features + 3  # +3 for degree, is_gene, is_disease
 
     x = torch.zeros(num_nodes, num_features)
+    expr_cols = max(len(all_tissues), 1)
+
     for i, n in enumerate(node_list):
         # Expression features
         expr = G.nodes[n].get("expression", {})
         for j, tissue in enumerate(all_tissues):
             x[i, j] = expr.get(tissue, 0.0)
+
+        offset = expr_cols
+        # AlphaFold features
+        if has_alphafold:
+            x[i, offset] = G.nodes[n].get("mean_plddt", 0.0) / 100.0  # normalize to 0-1
+            x[i, offset + 1] = G.nodes[n].get("disordered_fraction", 0.0)
+            x[i, offset + 2] = G.nodes[n].get("sequence_length", 0) / 5000.0  # normalize
+            offset += 3
+
         # Degree feature
-        x[i, -3] = float(G.degree(n))
+        x[i, offset] = float(G.degree(n))
         # Node type one-hot
         node_type = G.nodes[n].get("node_type", "")
-        x[i, -2] = 1.0 if node_type == "gene" else 0.0
-        x[i, -1] = 1.0 if node_type == "disease" else 0.0
+        x[i, offset + 1] = 1.0 if node_type == "gene" else 0.0
+        x[i, offset + 2] = 1.0 if node_type == "disease" else 0.0
 
-    # Normalize expression columns only
-    expr_cols = max(len(all_tissues), 1)
+    # Normalize expression columns
     max_vals = x[:, :expr_cols].max(dim=0).values.clamp(min=1.0)
     x[:, :expr_cols] = x[:, :expr_cols] / max_vals
     # Normalize degree
-    max_deg = x[:, -3].max().clamp(min=1.0)
-    x[:, -3] = x[:, -3] / max_deg
+    deg_col = expr_cols + af_features
+    max_deg = x[:, deg_col].max().clamp(min=1.0)
+    x[:, deg_col] = x[:, deg_col] / max_deg
 
     # Build edges
     src, dst = [], []
