@@ -114,6 +114,23 @@ class BulkDatasetManager:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS training_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    model_type TEXT NOT NULL,
+                    parameters TEXT NOT NULL,
+                    graph_name TEXT,
+                    nodes INTEGER,
+                    edges INTEGER,
+                    features INTEGER,
+                    epochs_run INTEGER,
+                    auc_roc REAL,
+                    avg_precision REAL,
+                    model_path TEXT
+                )
+            """)
+
     def get_status(self) -> dict[str, dict]:
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute("SELECT source, status, downloaded_at, row_count FROM download_status").fetchall()
@@ -880,6 +897,55 @@ class BulkDatasetManager:
                    VALUES (?, ?, ?, ?)""",
                 (source, status, datetime.datetime.now().isoformat(), row_count),
             )
+
+    def save_training_run(self, model_type: str, parameters: str, graph_name: str,
+                          nodes: int, edges: int, features: int, epochs_run: int,
+                          auc_roc: float, avg_precision: float, model, model_name: str) -> int:
+        """Save a training run with metrics and model weights."""
+        import datetime
+        import torch
+
+        # Save model weights
+        models_dir = os.path.join(self.data_dir, "trained_models")
+        os.makedirs(models_dir, exist_ok=True)
+        model_path = os.path.join(models_dir, f"{model_name}.pt")
+        torch.save(model.state_dict(), model_path)
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """INSERT INTO training_runs
+                   (created_at, model_type, parameters, graph_name, nodes, edges,
+                    features, epochs_run, auc_roc, avg_precision, model_path)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (datetime.datetime.now().isoformat(), model_type, parameters,
+                 graph_name, nodes, edges, features, epochs_run,
+                 round(auc_roc, 6), round(avg_precision, 6), model_path),
+            )
+            return cursor.lastrowid
+
+    def list_training_runs(self) -> list[dict]:
+        """List all training runs with metrics."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            tables = [t[0] for t in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "training_runs" not in tables:
+                return []
+            rows = conn.execute(
+                "SELECT * FROM training_runs ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_training_run(self, run_id: int):
+        """Delete a training run and its model file."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT model_path FROM training_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row and row[0] and os.path.exists(row[0]):
+                os.remove(row[0])
+            conn.execute("DELETE FROM training_runs WHERE id = ?", (run_id,))
 
     def save_graph(self, graph, name: str):
         """Save a NetworkX graph to the data directory."""

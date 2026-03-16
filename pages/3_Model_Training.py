@@ -306,7 +306,33 @@ with col_monitor:
         st.metric("AUC-ROC", f"{metrics['auc_roc']:.4f}")
         st.metric("Avg Precision", f"{metrics['avg_precision']:.4f}")
 
-        # Store results
+        # Build params string
+        if model_type == "GNN":
+            params_str = f"layers={num_layers}, hidden={hidden_dim}, aggr={aggr}, lr={lr}, epochs={epochs}"
+        elif model_type == "Graph Transformer":
+            params_str = f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, lr={lr}, epochs={epochs}"
+        else:
+            params_str = f"layers={num_layers}, hidden={hidden_dim}, latent={latent_dim}, beta={beta}, lr={lr}, epochs={epochs}"
+
+        # Save training run
+        import datetime
+        model_name = f"{model_type.lower().replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        run_id = manager.save_training_run(
+            model_type=model_type,
+            parameters=params_str,
+            graph_name=graph_id,
+            nodes=pyg_data.num_nodes,
+            edges=pyg_data.edge_index.size(1) // 2,
+            features=in_channels,
+            epochs_run=len(history["train_loss"]),
+            auc_roc=metrics["auc_roc"],
+            avg_precision=metrics["avg_precision"],
+            model=model,
+            model_name=model_name,
+        )
+        st.caption(f"Run saved (#{run_id})")
+
+        # Store results in session
         session.set_training_results({
             "model": model,
             "trainer": trainer,
@@ -320,3 +346,33 @@ with col_monitor:
 
         if st.button("📊 View Results"):
             st.switch_page("pages/4_Results.py")
+
+# Training History
+st.divider()
+st.subheader("📋 Training History")
+
+runs = manager.list_training_runs()
+if runs:
+    import pandas as pd
+    df = pd.DataFrame(runs)
+    df["created_at"] = df["created_at"].str[:19].str.replace("T", " ")
+    display_df = df[["id", "created_at", "model_type", "parameters", "nodes", "edges",
+                      "features", "epochs_run", "auc_roc", "avg_precision"]].copy()
+    display_df.columns = ["#", "Date", "Model", "Parameters", "Nodes", "Edges",
+                          "Features", "Epochs", "AUC-ROC", "Avg Precision"]
+    display_df["AUC-ROC"] = display_df["AUC-ROC"].apply(lambda x: f"{x:.4f}")
+    display_df["Avg Precision"] = display_df["Avg Precision"].apply(lambda x: f"{x:.4f}")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    # Delete run
+    col_del1, col_del2 = st.columns([3, 1])
+    with col_del1:
+        del_id = st.number_input("Run # to delete", min_value=1, step=1, key="del_run_id")
+    with col_del2:
+        st.write("")
+        if st.button("🗑️ Delete Run"):
+            manager.delete_training_run(del_id)
+            st.rerun()
+else:
+    st.info("No training runs yet. Train a model above to see results here.")
