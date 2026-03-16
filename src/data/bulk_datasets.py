@@ -324,17 +324,41 @@ class BulkDatasetManager:
         if on_progress:
             on_progress(f"Found UniProt IDs for {len(genes_with_uniprot)} / {len(hpa_gene_set)} HPA genes")
 
-        # Step 2: Query AlphaFold for each UniProt ID
+        # Step 2: Check what's already downloaded (resume support)
+        already_done = set()
+        with sqlite3.connect(self.db_path) as conn:
+            tables = [t[0] for t in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            if "alphafold" in tables:
+                existing = conn.execute("SELECT gene FROM alphafold").fetchall()
+                already_done = {r[0] for r in existing}
+
+        # Filter out already-downloaded genes
+        todo = [(g, u) for g, u in genes_with_uniprot if g not in already_done]
+
         if on_progress:
-            on_progress("Step 2/3: Fetching AlphaFold predictions...")
+            on_progress(f"Step 2/3: Fetching AlphaFold predictions... "
+                        f"({len(already_done)} already done, {len(todo)} remaining)")
 
-        rows = []
+        if not todo:
+            total_count = len(already_done)
+            self._set_status("alphafold", "complete", total_count)
+            if on_progress:
+                on_progress(f"AlphaFold already complete: {total_count} genes")
+            return total_count
+
+        # Fetch in batches, saving immediately to DB after each batch
+        batch = []
+        batch_size = 100
+        fetched = 0
         failed = 0
-        total = len(genes_with_uniprot)
+        total = len(todo)
 
-        for i, (gene_name, uniprot_id) in enumerate(genes_with_uniprot):
+        for i, (gene_name, uniprot_id) in enumerate(todo):
             if on_progress and i % 100 == 0:
-                on_progress(f"AlphaFold: {i}/{total} ({len(rows)} OK, {failed} failed)")
+                on_progress(f"AlphaFold: {i}/{total} remaining "
+                            f"({fetched + len(already_done)} total, {failed} failed)")
 
             try:
                 resp = requests.get(
@@ -350,7 +374,7 @@ class BulkDatasetManager:
                     failed += 1
                     continue
 
-                rows.append((
+                batch.append((
                     uniprot_id,
                     gene_name,
                     pred.get("globalMetricValue", 0.0),
@@ -362,33 +386,35 @@ class BulkDatasetManager:
                     pred.get("fractionPlddtVeryLow", 0.0) + pred.get("fractionPlddtLow", 0.0),
                     pred.get("pdbUrl", ""),
                 ))
+                fetched += 1
             except Exception:
                 failed += 1
 
-            # Save progress every 1000 rows
-            if len(rows) > 0 and len(rows) % 1000 == 0:
+            # Flush batch to DB immediately
+            if len(batch) >= batch_size:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.executemany(
                         "INSERT OR REPLACE INTO alphafold VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        rows[-1000:]
+                        batch
                     )
-                if on_progress:
-                    on_progress(f"Checkpoint: {len(rows)} saved...")
+                batch = []
+                # Update status so progress survives crashes
+                total_so_far = fetched + len(already_done)
+                self._set_status("alphafold", f"in_progress ({total_so_far})", total_so_far)
 
-        # Step 3: Final save
-        if on_progress:
-            on_progress("Step 3/3: Saving to database...")
-
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM alphafold")
-            if rows:
+        # Flush remaining
+        if batch:
+            with sqlite3.connect(self.db_path) as conn:
                 conn.executemany(
-                    "INSERT OR REPLACE INTO alphafold VALUES (?,?,?,?,?,?,?,?,?,?)", rows
+                    "INSERT OR REPLACE INTO alphafold VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    batch
                 )
-        self._set_status("alphafold", "complete", len(rows))
+
+        total_count = fetched + len(already_done)
+        self._set_status("alphafold", "complete", total_count)
         if on_progress:
-            on_progress(f"AlphaFold done: {len(rows)} genes indexed, {failed} failed")
-        return len(rows)
+            on_progress(f"AlphaFold done: {total_count} genes indexed ({fetched} new, {failed} failed)")
+        return total_count
 
     def download_all(self, on_progress=None) -> dict[str, int]:
         results = {}

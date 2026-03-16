@@ -63,10 +63,10 @@ if graph is None:
 
     if graph_mode == "Full dataset (all genes)":
         st.markdown("""
-        Merges **all 4 sources** into one graph:
+        Merges **all 5 sources** into one graph:
         - **Nodes:** All genes from HPA (~20K) + GWAS diseases
         - **Edges:** STRING protein interactions + GWAS gene-disease links
-        - **Features:** GTEx expression (54 tissues) + HPA annotations
+        - **Features:** GTEx expression (54 tissues) + AlphaFold structure (pLDDT, disorder, length) + HPA annotations
         """)
         full_min_score = st.select_slider(
             "Min STRING score (higher = fewer but stronger edges)",
