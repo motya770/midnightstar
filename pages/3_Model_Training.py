@@ -245,10 +245,10 @@ with col_config:
     num_neighbors = None
     if mini_batch:
         batch_size = st.select_slider("Batch size (edges)", [128, 256, 512, 1024, 2048], value=512)
-        num_neighbors = st.select_slider("Neighbors per layer",
-                                          options=[[10, 5], [15, 10], [20, 10], [25, 15], [30, 20]],
-                                          value=[20, 10],
-                                          format_func=lambda x: f"{x[0]}, {x[1]}")
+        neighbor_opt = st.selectbox("Neighbors per layer",
+                                     ["10, 5", "15, 10", "20, 10", "25, 15", "30, 20"],
+                                     index=2)
+        num_neighbors = [int(x) for x in neighbor_opt.split(", ")]
 
     st.divider()
     st.subheader("Compute")

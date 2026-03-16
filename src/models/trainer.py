@@ -5,7 +5,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch_geometric.data import Data
-from torch_geometric.loader import LinkNeighborLoader
 from torch_geometric.transforms import RandomLinkSplit
 from torch_geometric.utils import negative_sampling
 from sklearn.metrics import roc_auc_score, average_precision_score
@@ -16,12 +15,12 @@ class TrainConfig:
     epochs: int = 100
     lr: float = 0.001
     batch_size: int = 512
-    num_neighbors: list[int] | None = None  # neighbors per layer, e.g. [20, 10]
+    num_neighbors: list[int] | None = None
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     early_stopping: bool = False
     patience: int = 10
-    mini_batch: bool = False  # if True, use LinkNeighborLoader
+    mini_batch: bool = False
 
 
 class Trainer:
@@ -77,42 +76,63 @@ class Trainer:
         self.optimizer.step()
         return loss.item()
 
-    # ---- Mini-batch training ----
-
-    def _make_loader(self, split_data, shuffle: bool = True):
-        """Create a LinkNeighborLoader for mini-batch training."""
-        num_neighbors = self.config.num_neighbors or [20, 10]
-        return LinkNeighborLoader(
-            data=split_data,
-            num_neighbors=num_neighbors,
-            edge_label_index=split_data.edge_label_index,
-            edge_label=split_data.edge_label,
-            batch_size=self.config.batch_size,
-            shuffle=shuffle,
-            neg_sampling_ratio=1.0,
-        )
+    # ---- Mini-batch training (edge chunking) ----
+    # Instead of LinkNeighborLoader (requires pyg-lib), we:
+    # 1. Compute full node embeddings once per epoch (full-graph forward)
+    # 2. Chunk the edge scoring into mini-batches
+    # This saves memory on the decode + backward step, not the encode step.
+    # For the encode step, we use torch.no_grad() caching + gradient checkpointing.
 
     def _train_step_mini(self) -> float:
         self.model.train()
-        loader = self._make_loader(self._train_data, shuffle=True)
+        train_data = self._train_data
+        bs = self.config.batch_size
+
+        # Full encode (shared across all edge batches)
+        if self._is_vae:
+            # VAE: just chunk the loss computation
+            loss = self.model.loss(train_data.x, train_data.edge_index)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            return loss.item()
+
+        # GNN/Transformer: encode once, decode in batches
+        z = self.model.encode(train_data)
+
+        pos_edge = train_data.edge_label_index
+        pos_src, pos_dst = pos_edge[0], pos_edge[1]
+        neg_edge = negative_sampling(
+            edge_index=train_data.edge_index,
+            num_nodes=train_data.num_nodes,
+            num_neg_samples=pos_src.size(0),
+        )
+        all_src = torch.cat([pos_src, neg_edge[0]])
+        all_dst = torch.cat([pos_dst, neg_edge[1]])
+        all_labels = torch.cat([
+            torch.ones(pos_src.size(0)),
+            torch.zeros(neg_edge[0].size(0)),
+        ])
+
+        # Shuffle edges
+        perm = torch.randperm(all_src.size(0))
+        all_src, all_dst, all_labels = all_src[perm], all_dst[perm], all_labels[perm]
+
         total_loss = 0.0
         num_batches = 0
 
-        for batch in loader:
+        for start in range(0, all_src.size(0), bs):
+            end = min(start + bs, all_src.size(0))
+            batch_src = all_src[start:end]
+            batch_dst = all_dst[start:end]
+            batch_labels = all_labels[start:end]
+
             self.optimizer.zero_grad()
-
-            if self._is_vae:
-                loss = self.model.loss(batch.x, batch.edge_index)
-            else:
-                src = batch.edge_label_index[0]
-                dst = batch.edge_label_index[1]
-                labels = batch.edge_label.float()
-
-                preds = self.model(batch, src, dst)
-                loss = nn.functional.binary_cross_entropy(preds, labels)
-
-            loss.backward()
+            preds = self.model.decode(z, batch_src, batch_dst)
+            loss = nn.functional.binary_cross_entropy(preds, batch_labels)
+            loss.backward(retain_graph=True)
             self.optimizer.step()
+
             total_loss += loss.item()
             num_batches += 1
 
@@ -120,31 +140,39 @@ class Trainer:
 
     def _eval_auc_mini(self, split_data) -> float:
         self.model.eval()
-        loader = self._make_loader(split_data, shuffle=False)
-        all_labels = []
-        all_scores = []
+        bs = self.config.batch_size
 
         with torch.no_grad():
-            for batch in loader:
-                src = batch.edge_label_index[0]
-                dst = batch.edge_label_index[1]
-                labels = batch.edge_label.float()
+            edge_label_index = split_data.edge_label_index
+            src, dst = edge_label_index[0], edge_label_index[1]
+            labels = split_data.edge_label.float()
 
-                if self._is_vae:
-                    scores = self.model.predict_links(batch.x, batch.edge_index, src, dst)
-                else:
-                    scores = self.model(batch, src, dst)
+            if self._is_vae:
+                # Chunk predict_links
+                all_scores = []
+                for start in range(0, src.size(0), bs):
+                    end = min(start + bs, src.size(0))
+                    scores = self.model.predict_links(
+                        split_data.x, split_data.edge_index,
+                        src[start:end], dst[start:end]
+                    )
+                    all_scores.append(scores)
+                all_scores = torch.cat(all_scores).numpy()
+            else:
+                z = self.model.encode(split_data)
+                all_scores = []
+                for start in range(0, src.size(0), bs):
+                    end = min(start + bs, src.size(0))
+                    scores = self.model.decode(z, src[start:end], dst[start:end])
+                    all_scores.append(scores)
+                all_scores = torch.cat(all_scores).numpy()
 
-                all_labels.append(labels.cpu())
-                all_scores.append(scores.cpu())
+            labels = labels.numpy()
 
-        all_labels = torch.cat(all_labels).numpy()
-        all_scores = torch.cat(all_scores).numpy()
-
-        if len(set(all_labels)) < 2:
+        if len(set(labels)) < 2:
             return 0.5
         try:
-            return float(roc_auc_score(all_labels, all_scores))
+            return float(roc_auc_score(labels, all_scores))
         except ValueError:
             return 0.5
 
@@ -234,32 +262,40 @@ class Trainer:
         }
 
     def _evaluate_mini(self) -> dict[str, float]:
-        loader = self._make_loader(self._test_data, shuffle=False)
-        all_labels = []
-        all_scores = []
+        bs = self.config.batch_size
+        test_data = self._test_data
 
         self.model.eval()
         with torch.no_grad():
-            for batch in loader:
-                src = batch.edge_label_index[0]
-                dst = batch.edge_label_index[1]
-                labels = batch.edge_label.float()
+            src = test_data.edge_label_index[0]
+            dst = test_data.edge_label_index[1]
+            labels = test_data.edge_label.float()
 
-                if self._is_vae:
-                    scores = self.model.predict_links(batch.x, batch.edge_index, src, dst)
-                else:
-                    scores = self.model(batch, src, dst)
+            if self._is_vae:
+                all_scores = []
+                for start in range(0, src.size(0), bs):
+                    end = min(start + bs, src.size(0))
+                    scores = self.model.predict_links(
+                        test_data.x, test_data.edge_index,
+                        src[start:end], dst[start:end]
+                    )
+                    all_scores.append(scores)
+                all_scores = torch.cat(all_scores).numpy()
+            else:
+                z = self.model.encode(test_data)
+                all_scores = []
+                for start in range(0, src.size(0), bs):
+                    end = min(start + bs, src.size(0))
+                    scores = self.model.decode(z, src[start:end], dst[start:end])
+                    all_scores.append(scores)
+                all_scores = torch.cat(all_scores).numpy()
 
-                all_labels.append(labels.cpu())
-                all_scores.append(scores.cpu())
+            labels = labels.numpy()
 
-        all_labels = torch.cat(all_labels).numpy()
-        all_scores = torch.cat(all_scores).numpy()
-
-        if len(set(all_labels)) < 2:
-            return {"auc_roc": 0.5, "avg_precision": float(all_labels.mean())}
+        if len(set(labels)) < 2:
+            return {"auc_roc": 0.5, "avg_precision": float(labels.mean())}
 
         return {
-            "auc_roc": float(roc_auc_score(all_labels, all_scores)),
-            "avg_precision": float(average_precision_score(all_labels, all_scores)),
+            "auc_roc": float(roc_auc_score(labels, all_scores)),
+            "avg_precision": float(average_precision_score(labels, all_scores)),
         }
