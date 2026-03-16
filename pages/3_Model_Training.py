@@ -239,6 +239,16 @@ with col_config:
     epochs = st.slider("Epochs", 10, 500, 100)
     lr = st.select_slider("Learning rate", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=0.001)
     early_stop = st.checkbox("Early stopping", value=True)
+    mini_batch = st.checkbox("Mini-batch training", value=False,
+                             help="Samples subgraphs per batch instead of full graph. Reduces memory, required for large graphs with Transformer.")
+    batch_size = 512
+    num_neighbors = None
+    if mini_batch:
+        batch_size = st.select_slider("Batch size (edges)", [128, 256, 512, 1024, 2048], value=512)
+        num_neighbors = st.select_slider("Neighbors per layer",
+                                          options=[[10, 5], [15, 10], [20, 10], [25, 15], [30, 20]],
+                                          value=[20, 10],
+                                          format_func=lambda x: f"{x[0]}, {x[1]}")
 
     st.divider()
     st.subheader("Compute")
@@ -296,7 +306,9 @@ with col_monitor:
         st.caption(f"Model parameters: {total_params:,}")
 
         config_dict = dict(epochs=epochs, lr=lr, train_ratio=train_ratio,
-                           val_ratio=val_ratio, early_stopping=early_stop, patience=10)
+                           val_ratio=val_ratio, early_stopping=early_stop, patience=10,
+                           mini_batch=mini_batch, batch_size=batch_size,
+                           num_neighbors=num_neighbors)
 
         if compute_mode == "Remote GPU (Modal)":
             # Remote training via Modal
