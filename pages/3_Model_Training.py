@@ -240,79 +240,137 @@ with col_config:
     lr = st.select_slider("Learning rate", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=0.001)
     early_stop = st.checkbox("Early stopping", value=True)
 
+    st.divider()
+    st.subheader("Compute")
+    compute_mode = st.radio("Train on", ["Local (CPU)", "Remote GPU (Modal)"])
+    gpu_type = None
+    if compute_mode == "Remote GPU (Modal)":
+        gpu_type = st.selectbox("GPU", ["T4 (~$0.60/hr)", "A10G (~$1.10/hr)", "A100 (~$3.00/hr)"])
+        gpu_type = gpu_type.split(" ")[0]
+        try:
+            import modal
+            st.caption("Modal is installed")
+        except ImportError:
+            st.error("Modal not installed. Run: `pip install modal && modal setup`")
+
 with col_monitor:
     st.subheader("📈 Training Monitor")
 
     if st.button("🚀 Start Training", type="primary", use_container_width=True):
-        # Build model
+        # Build model kwargs
         if model_type == "GNN":
-            model = GNNLinkPredictor(in_channels, hidden_dim, num_layers, aggr)
+            model_class = "GNNLinkPredictor"
+            model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
+                                num_layers=num_layers, aggr=aggr)
+            params_str = f"layers={num_layers}, hidden={hidden_dim}, aggr={aggr}, lr={lr}, epochs={epochs}"
         elif model_type == "Graph Transformer":
-            model = GraphTransformerLinkPredictor(
-                in_channels, hidden_dim, num_layers, num_heads, rwse_dim=16, rwse_walk_length=rwse_k,
-            )
+            model_class = "GraphTransformerLinkPredictor"
+            model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
+                                num_layers=num_layers, num_heads=num_heads,
+                                rwse_dim=16, rwse_walk_length=rwse_k)
+            params_str = f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, lr={lr}, epochs={epochs}"
         else:
-            model = GraphVAE(in_channels, hidden_dim, latent_dim, num_layers, beta)
+            model_class = "GraphVAE"
+            model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
+                                latent_dim=latent_dim, num_layers=num_layers, beta=beta)
+            params_str = f"layers={num_layers}, hidden={hidden_dim}, latent={latent_dim}, beta={beta}, lr={lr}, epochs={epochs}"
 
-        config = TrainConfig(
-            epochs=epochs, lr=lr, train_ratio=train_ratio,
-            val_ratio=val_ratio, early_stopping=early_stop,
-        )
-        trainer = Trainer(model, config)
+        # Create local model (needed for param count and local training)
+        if model_type == "GNN":
+            model = GNNLinkPredictor(**model_kwargs)
+        elif model_type == "Graph Transformer":
+            model = GraphTransformerLinkPredictor(**model_kwargs)
+        else:
+            model = GraphVAE(**model_kwargs)
 
         # Print training params
-        st.markdown("**Training started**")
+        compute_label = f"Remote GPU ({gpu_type})" if compute_mode == "Remote GPU (Modal)" else "Local CPU"
+        st.markdown(f"**Training started** — {compute_label}")
         param_cols = st.columns(4)
         param_cols[0].metric("Model", model_type)
         param_cols[1].metric("Nodes", f"{pyg_data.num_nodes:,}")
         param_cols[2].metric("Edges", f"{pyg_data.edge_index.size(1) // 2:,}")
         param_cols[3].metric("Features", in_channels)
-
-        if model_type == "GNN":
-            st.code(f"GNN(layers={num_layers}, hidden={hidden_dim}, aggr={aggr}, lr={lr}, epochs={epochs}, "
-                    f"train={train_ratio}, val={val_ratio}, early_stop={early_stop})", language=None)
-        elif model_type == "Graph Transformer":
-            st.code(f"GraphTransformer(layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, "
-                    f"rwse_k={rwse_k}, lr={lr}, epochs={epochs}, train={train_ratio}, val={val_ratio}, "
-                    f"early_stop={early_stop})", language=None)
-        else:
-            st.code(f"VAE(layers={num_layers}, hidden={hidden_dim}, latent={latent_dim}, beta={beta}, "
-                    f"lr={lr}, epochs={epochs}, train={train_ratio}, val={val_ratio}, "
-                    f"early_stop={early_stop})", language=None)
-
+        st.code(f"{model_class}({params_str})", language=None)
         total_params = sum(p.numel() for p in model.parameters())
         st.caption(f"Model parameters: {total_params:,}")
 
-        progress_bar = st.progress(0)
-        loss_chart = st.empty()
-        status_text = st.empty()
-        loss_history = []
-        auc_history = []
+        config_dict = dict(epochs=epochs, lr=lr, train_ratio=train_ratio,
+                           val_ratio=val_ratio, early_stopping=early_stop, patience=10)
 
-        def on_epoch(epoch, loss, val_auc):
-            loss_history.append(loss)
-            auc_history.append(val_auc)
-            progress_bar.progress((epoch + 1) / epochs)
-            status_text.text(f"Epoch {epoch + 1}/{epochs} — Loss: {loss:.4f}, Val AUC: {val_auc:.4f}")
-            import pandas as pd
-            df = pd.DataFrame({"Loss": loss_history, "Val AUC": auc_history})
-            loss_chart.line_chart(df)
+        if compute_mode == "Remote GPU (Modal)":
+            # Remote training via Modal
+            import pickle
+            st.info(f"Submitting to Modal ({gpu_type})... First run may take ~60s for cold start.")
 
-        with st.spinner("Training..."):
-            history = trainer.train(pyg_data, on_epoch=on_epoch)
+            with st.spinner(f"Training on {gpu_type} GPU..."):
+                try:
+                    from src.models.modal_app import (
+                        app as modal_app, train_on_gpu, train_on_a10g, train_on_a100,
+                        collect_source_code,
+                    )
 
-        metrics = trainer.evaluate(pyg_data)
-        st.success("Training complete!")
+                    data_bytes = pickle.dumps(pyg_data.cpu())
+                    src_code = collect_source_code()
+
+                    with modal_app.run():
+                        if gpu_type == "A10G":
+                            result = train_on_a10g.remote(model_class, model_kwargs, data_bytes, config_dict, src_code)
+                        elif gpu_type == "A100":
+                            result = train_on_a100.remote(model_class, model_kwargs, data_bytes, config_dict, src_code)
+                        else:
+                            result = train_on_gpu.remote(model_class, model_kwargs, data_bytes, config_dict, src_code)
+
+                    history = result["history"]
+                    metrics = result["metrics"]
+                    epochs_run = result["epochs_run"]
+
+                    # Load model state back
+                    state_dict = pickle.loads(result["model_state_dict"])
+                    model.load_state_dict(state_dict)
+
+                    st.success(f"Training complete on {result['device_used']}!")
+                    params_str += f", gpu={gpu_type}"
+
+                except Exception as e:
+                    st.error(f"Remote training failed: {e}")
+                    st.info("Falling back to local training...")
+                    compute_mode = "Local (CPU)"
+
+        if compute_mode == "Local (CPU)":
+            # Local training
+            config = TrainConfig(**config_dict)
+            trainer = Trainer(model, config)
+
+            progress_bar = st.progress(0)
+            loss_chart = st.empty()
+            status_text = st.empty()
+            loss_history = []
+            auc_history = []
+
+            def on_epoch(epoch, loss, val_auc):
+                loss_history.append(loss)
+                auc_history.append(val_auc)
+                progress_bar.progress((epoch + 1) / epochs)
+                status_text.text(f"Epoch {epoch + 1}/{epochs} — Loss: {loss:.4f}, Val AUC: {val_auc:.4f}")
+                import pandas as pd
+                df = pd.DataFrame({"Loss": loss_history, "Val AUC": auc_history})
+                loss_chart.line_chart(df)
+
+            with st.spinner("Training on CPU..."):
+                history = trainer.train(pyg_data, on_epoch=on_epoch)
+
+            metrics = trainer.evaluate(pyg_data)
+            st.success("Training complete!")
+
+        # Show results
         st.metric("AUC-ROC", f"{metrics['auc_roc']:.4f}")
         st.metric("Avg Precision", f"{metrics['avg_precision']:.4f}")
 
-        # Build params string
-        if model_type == "GNN":
-            params_str = f"layers={num_layers}, hidden={hidden_dim}, aggr={aggr}, lr={lr}, epochs={epochs}"
-        elif model_type == "Graph Transformer":
-            params_str = f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, lr={lr}, epochs={epochs}"
-        else:
-            params_str = f"layers={num_layers}, hidden={hidden_dim}, latent={latent_dim}, beta={beta}, lr={lr}, epochs={epochs}"
+        if "train_loss" in history:
+            import pandas as pd
+            df = pd.DataFrame({"Loss": history["train_loss"], "Val AUC": history["val_auc"]})
+            st.line_chart(df)
 
         # Save training run
         import datetime
