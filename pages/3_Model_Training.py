@@ -252,7 +252,12 @@ with col_config:
 
     st.divider()
     st.subheader("Compute")
-    compute_mode = st.radio("Train on", ["Local (CPU)", "Remote GPU (Modal)"])
+    import torch as _torch
+    compute_options = ["Local (CPU)"]
+    if _torch.backends.mps.is_available():
+        compute_options.append("Mac GPU (MPS)")
+    compute_options.append("Remote GPU (Modal)")
+    compute_mode = st.radio("Train on", compute_options)
     gpu_type = None
     if compute_mode == "Remote GPU (Modal)":
         gpu_type = st.selectbox("GPU", ["T4 (~$0.60/hr)", "A10G (~$1.10/hr)", "A100 (~$3.00/hr)"])
@@ -262,6 +267,8 @@ with col_config:
             st.caption("Modal is installed")
         except ImportError:
             st.error("Modal not installed. Run: `pip install modal && modal setup`")
+    elif compute_mode == "Mac GPU (MPS)":
+        st.caption("Apple Silicon GPU detected")
 
 with col_monitor:
     st.subheader("📈 Training Monitor")
@@ -305,10 +312,18 @@ with col_monitor:
         total_params = sum(p.numel() for p in model.parameters())
         st.caption(f"Model parameters: {total_params:,}")
 
+        # Determine device
+        if compute_mode == "Mac GPU (MPS)":
+            device = "mps"
+        elif compute_mode == "Remote GPU (Modal)":
+            device = "cpu"  # remote handles its own device
+        else:
+            device = "cpu"
+
         config_dict = dict(epochs=epochs, lr=lr, train_ratio=train_ratio,
                            val_ratio=val_ratio, early_stopping=early_stop, patience=10,
                            mini_batch=mini_batch, batch_size=batch_size,
-                           num_neighbors=num_neighbors)
+                           num_neighbors=num_neighbors, device=device)
 
         if compute_mode == "Remote GPU (Modal)":
             # Remote training via Modal
@@ -349,8 +364,8 @@ with col_monitor:
                     st.info("Falling back to local training...")
                     compute_mode = "Local (CPU)"
 
-        if compute_mode == "Local (CPU)":
-            # Local training
+        if compute_mode in ("Local (CPU)", "Mac GPU (MPS)"):
+            # Local training (CPU or MPS)
             config = TrainConfig(**config_dict)
             trainer = Trainer(model, config)
 
@@ -369,11 +384,12 @@ with col_monitor:
                 df = pd.DataFrame({"Loss": loss_history, "Val AUC": auc_history})
                 loss_chart.line_chart(df)
 
-            with st.spinner("Training on CPU..."):
+            device_label = "MPS GPU" if device == "mps" else "CPU"
+            with st.spinner(f"Training on {device_label}..."):
                 history = trainer.train(pyg_data, on_epoch=on_epoch)
 
             metrics = trainer.evaluate(pyg_data)
-            st.success("Training complete!")
+            st.success(f"Training complete on {device_label}!")
 
         # Show results
         st.metric("AUC-ROC", f"{metrics['auc_roc']:.4f}")

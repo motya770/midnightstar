@@ -21,14 +21,19 @@ class TrainConfig:
     early_stopping: bool = False
     patience: int = 10
     mini_batch: bool = False
+    device: str = "cpu"  # "cpu", "mps", or "cuda"
 
 
 class Trainer:
     def __init__(self, model: nn.Module, config: TrainConfig):
-        self.model = model
         self.config = config
         self._is_vae = hasattr(model, "loss") and hasattr(model, "predict_links")
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+
+        # Set device
+        self.device = torch.device(config.device)
+        self.model = model.to(self.device)
+
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
         self._train_data = None
         self._val_data = None
         self._test_data = None
@@ -40,7 +45,10 @@ class Trainer:
             num_test=test_ratio,
             add_negative_train_samples=False,
         )
-        self._train_data, self._val_data, self._test_data = transform(data)
+        train, val, test = transform(data)
+        self._train_data = train.to(self.device)
+        self._val_data = val.to(self.device)
+        self._test_data = test.to(self.device)
 
     # ---- Full-batch training (original) ----
 
@@ -157,7 +165,7 @@ class Trainer:
                         src[start:end], dst[start:end]
                     )
                     all_scores.append(scores)
-                all_scores = torch.cat(all_scores).numpy()
+                all_scores = torch.cat(all_scores).cpu().numpy()
             else:
                 z = self.model.encode(split_data)
                 all_scores = []
@@ -165,9 +173,9 @@ class Trainer:
                     end = min(start + bs, src.size(0))
                     scores = self.model.decode(z, src[start:end], dst[start:end])
                     all_scores.append(scores)
-                all_scores = torch.cat(all_scores).numpy()
+                all_scores = torch.cat(all_scores).cpu().numpy()
 
-            labels = labels.numpy()
+            labels = labels.cpu().numpy()
 
         if len(set(labels)) < 2:
             return 0.5
@@ -183,12 +191,12 @@ class Trainer:
         with torch.no_grad():
             edge_label_index = split_data.edge_label_index
             src, dst = edge_label_index[0], edge_label_index[1]
-            labels = split_data.edge_label.float().numpy()
+            labels = split_data.edge_label.float().cpu().numpy()
 
             if self._is_vae:
-                scores = self.model.predict_links(split_data.x, split_data.edge_index, src, dst).numpy()
+                scores = self.model.predict_links(split_data.x, split_data.edge_index, src, dst).cpu().numpy()
             else:
-                scores = self.model(split_data, src, dst).numpy()
+                scores = self.model(split_data, src, dst).cpu().numpy()
 
         if len(set(labels)) < 2:
             return 0.5
@@ -244,14 +252,14 @@ class Trainer:
         with torch.no_grad():
             edge_label_index = self._test_data.edge_label_index
             src, dst = edge_label_index[0], edge_label_index[1]
-            labels = self._test_data.edge_label.float().numpy()
+            labels = self._test_data.edge_label.float().cpu().numpy()
 
             if self._is_vae:
                 scores = self.model.predict_links(
                     self._test_data.x, self._test_data.edge_index, src, dst
-                ).numpy()
+                ).cpu().numpy()
             else:
-                scores = self.model(self._test_data, src, dst).numpy()
+                scores = self.model(self._test_data, src, dst).cpu().numpy()
 
         if len(set(labels)) < 2:
             return {"auc_roc": 0.5, "avg_precision": float(labels.mean())}
@@ -280,7 +288,7 @@ class Trainer:
                         src[start:end], dst[start:end]
                     )
                     all_scores.append(scores)
-                all_scores = torch.cat(all_scores).numpy()
+                all_scores = torch.cat(all_scores).cpu().numpy()
             else:
                 z = self.model.encode(test_data)
                 all_scores = []
@@ -288,9 +296,9 @@ class Trainer:
                     end = min(start + bs, src.size(0))
                     scores = self.model.decode(z, src[start:end], dst[start:end])
                     all_scores.append(scores)
-                all_scores = torch.cat(all_scores).numpy()
+                all_scores = torch.cat(all_scores).cpu().numpy()
 
-            labels = labels.numpy()
+            labels = labels.cpu().numpy()
 
         if len(set(labels)) < 2:
             return {"auc_roc": 0.5, "avg_precision": float(labels.mean())}
