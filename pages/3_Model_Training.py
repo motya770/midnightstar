@@ -365,8 +365,7 @@ with col_monitor:
 
                 except Exception as e:
                     st.error(f"Remote training failed: {e}")
-                    st.info("Falling back to local training...")
-                    compute_mode = "Local (CPU)"
+                    st.stop()
 
         if compute_mode in ("Local (CPU)", "Mac GPU (MPS)"):
             # Local training (CPU or MPS)
