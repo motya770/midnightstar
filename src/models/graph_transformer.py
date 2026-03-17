@@ -41,49 +41,11 @@ class RWSEEncoder(nn.Module):
 
         rw_diag = torch.zeros(num_nodes, self.walk_length, device=edge_index.device)
 
-        # Build adjacency list for fast sparse mat-vec
-        # Use COO format directly: for each walk step, propagate probabilities
-        # along edges using scatter operations (O(edges) per step, not O(n²))
-
-        # Start: each node has probability 1 at itself
-        prob = torch.ones(num_nodes, device=edge_index.device)  # current return probability
-
-        # For step k: new_prob[i] = sum_j (RW[j,i] * prob[j]) where RW[j,i] = 1/deg[j] if edge j->i
-        # This is: new_prob = RW^T @ prob, done via scatter
-        rw_t_row = col  # transposed: original col becomes row
-        rw_t_col = row  # transposed: original row becomes col
-        rw_t_vals = rw_values  # same values
-
-        # But we need per-node return probabilities, not a global vector.
-        # For that we need N separate random walks. Instead, approximate:
-        # Use random walk landing probabilities estimated via repeated sparse mat-vec
-        # on a random probe matrix (random projection trick).
-
-        # Random projection: instead of N separate walks, use R random vectors
-        # and estimate diag(RW^k) ≈ mean of element-wise products
-        num_probes = 32  # more probes = more accurate, 32 is good enough
+        # Hutchinson estimator: approximate diag(RW^k) using random Rademacher probes
+        # E[z_i * (RW^k z)_i] = (RW^k)_{ii} = return probability at step k
+        num_probes = 32
         print(f"[DEBUG] RWSE: random probe mode ({num_nodes} nodes, {num_probes} probes, {self.walk_length} walks)...", flush=True)
 
-        # Random Rademacher vectors: +1 or -1
-        probes = torch.sign(torch.randn(num_nodes, num_probes, device=edge_index.device))
-        # probes shape: (N, R)
-
-        for k in range(self.walk_length):
-            # Apply RW^T to each probe column via scatter
-            # new_probes[i] = sum over j where edge j->i: (1/deg[j]) * probes[j]
-            # Using scatter_add on the transposed adjacency
-            src_vals = probes[row] * rw_values.unsqueeze(1)  # (edges, R)
-            new_probes = torch.zeros_like(probes)
-            new_probes.scatter_add_(0, col.unsqueeze(1).expand_as(src_vals), src_vals)
-            probes = new_probes
-
-            # Estimate diag(RW^k) ≈ mean of (original_probes * current_probes) per node
-            # But we lost the original probes. Use Hutchinson's trick:
-            # E[z^T A^k z] = tr(A^k) for random z, and per-element: E[z_i * (A^k z)_i] = (A^k)_{ii}
-            # So: rw_diag[:, k] = mean over probes of (probe_original * probe_current)
-            pass
-
-        # Restart with proper Hutchinson estimator
         probes_orig = torch.sign(torch.randn(num_nodes, num_probes, device=edge_index.device))
         probes = probes_orig.clone()
 
