@@ -8,6 +8,7 @@ from torch_geometric.data import Data
 from torch_geometric.transforms import RandomLinkSplit
 from torch_geometric.utils import negative_sampling
 from sklearn.metrics import roc_auc_score, average_precision_score
+from tqdm import tqdm
 
 
 @dataclass
@@ -123,13 +124,17 @@ class Trainer:
         ])
 
         # Shuffle edges
-        perm = torch.randperm(all_src.size(0))
+        perm = torch.randperm(all_src.size(0), device=all_src.device)
         all_src, all_dst, all_labels = all_src[perm], all_dst[perm], all_labels[perm]
 
         total_loss = 0.0
-        num_batches = 0
+        num_batches = (all_src.size(0) + bs - 1) // bs
 
-        for start in range(0, all_src.size(0), bs):
+        batch_iter = range(0, all_src.size(0), bs)
+        batch_pbar = tqdm(batch_iter, desc=f"  Batches", leave=False,
+                          total=num_batches, unit="batch")
+
+        for start in batch_pbar:
             end = min(start + bs, all_src.size(0))
             batch_src = all_src[start:end]
             batch_dst = all_dst[start:end]
@@ -142,8 +147,9 @@ class Trainer:
             self.optimizer.step()
 
             total_loss += loss.item()
-            num_batches += 1
+            batch_pbar.set_postfix(loss=f"{loss.item():.4f}")
 
+        batch_pbar.close()
         return total_loss / max(num_batches, 1)
 
     def _eval_auc_mini(self, split_data) -> float:
@@ -218,12 +224,15 @@ class Trainer:
         best_val = 0.0
         patience_counter = 0
 
-        for epoch in range(self.config.epochs):
+        epoch_pbar = tqdm(range(self.config.epochs), desc="Epochs", unit="epoch")
+        for epoch in epoch_pbar:
             train_loss = train_step()
             val_auc = eval_auc(self._val_data)
 
             history["train_loss"].append(train_loss)
             history["val_auc"].append(val_auc)
+
+            epoch_pbar.set_postfix(loss=f"{train_loss:.4f}", val_auc=f"{val_auc:.4f}")
 
             if on_epoch:
                 on_epoch(epoch, train_loss, val_auc)
@@ -235,7 +244,10 @@ class Trainer:
                 else:
                     patience_counter += 1
                     if patience_counter >= self.config.patience:
+                        epoch_pbar.close()
                         break
+
+        epoch_pbar.close()
 
         return history
 
