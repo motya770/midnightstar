@@ -245,6 +245,9 @@ with col_config:
     num_neighbors = None
     if mini_batch:
         batch_size = st.select_slider("Batch size (edges)", [128, 256, 512, 1024, 2048], value=512)
+        edge_dropout = st.slider("Edge dropout", 0.0, 0.7, 0.3, 0.05,
+                                  help="Fraction of edges randomly dropped during encode each epoch. "
+                                       "Prevents overfitting. 0.3 = drop 30% of edges.")
         neighbor_opt = st.selectbox("Neighbors per layer",
                                      ["10, 5", "15, 10", "20, 10", "25, 15", "30, 20"],
                                      index=2)
@@ -323,6 +326,7 @@ with col_monitor:
         config_dict = dict(epochs=epochs, lr=lr, train_ratio=train_ratio,
                            val_ratio=val_ratio, early_stopping=early_stop, patience=10,
                            mini_batch=mini_batch, batch_size=batch_size,
+                           edge_dropout=edge_dropout if mini_batch else 0.0,
                            num_neighbors=num_neighbors, device=device)
 
         if compute_mode == "Remote GPU (Modal)":

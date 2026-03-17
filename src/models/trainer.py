@@ -23,6 +23,7 @@ class TrainConfig:
     early_stopping: bool = False
     patience: int = 10
     mini_batch: bool = False
+    edge_dropout: float = 0.3  # fraction of edges to drop during encode (prevents overfitting)
     device: str = "cpu"  # "cpu", "mps", or "cuda"
 
 
@@ -159,11 +160,22 @@ class Trainer:
             self.optimizer.step()
             return loss.item()
 
-        # GNN/Transformer: encode once, decode in batches
-        # Detach embeddings so we can backward per batch without retain_graph
+        # GNN/Transformer: encode with edge dropout, decode in batches
+        # Edge dropout: randomly mask edges during encode so the model can't memorize
         t0 = _time.time()
-        print("[DEBUG] mini: encoding full graph...", end=" ", flush=True)
-        z = self.model.encode(train_data).detach().requires_grad_(True)
+        dropout = self.config.edge_dropout
+        if dropout > 0:
+            mask = torch.rand(train_data.edge_index.size(1), device=self.device) > dropout
+            dropped_ei = train_data.edge_index[:, mask]
+            dropped_data = Data(x=train_data.x, edge_index=dropped_ei, num_nodes=train_data.num_nodes)
+            kept = mask.sum().item()
+            total_ei = train_data.edge_index.size(1)
+            print(f"[DEBUG] mini: encoding with edge dropout={dropout} ({kept}/{total_ei} edges)...", end=" ", flush=True)
+        else:
+            dropped_data = train_data
+            print("[DEBUG] mini: encoding full graph...", end=" ", flush=True)
+
+        z = self.model.encode(dropped_data).detach().requires_grad_(True)
         print(f"{_time.time()-t0:.1f}s (z shape: {z.shape})", flush=True)
 
         pos_edge = train_data.edge_label_index
@@ -210,11 +222,11 @@ class Trainer:
 
         batch_pbar.close()
 
-        # Now do a full encode backward using accumulated z.grad
+        # Encoder backward using same dropped edges (consistent with forward)
         print("[DEBUG] mini: encoder backward...", end=" ", flush=True)
         t0 = _time.time()
         self.optimizer.zero_grad()
-        z_fresh = self.model.encode(train_data)
+        z_fresh = self.model.encode(dropped_data)
         z_fresh.backward(z.grad)
         self.optimizer.step()
         print(f"{_time.time()-t0:.1f}s", flush=True)
