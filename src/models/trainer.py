@@ -92,11 +92,17 @@ class Trainer:
                 edge_label=labels,
             )
 
-        # Train split sees only train edges for message passing
-        # Val/test see train edges for message passing but are scored on held-out edges
-        self._train_data = _make_split(train_edges, train_edges).to(self.device)
-        self._val_data = _make_split(val_edges, train_edges).to(self.device)
-        self._test_data = _make_split(test_edges, train_edges).to(self.device)
+        # Split train edges into message-passing and supervision subsets.
+        # Supervision edges must NOT appear in the MP graph — otherwise the model
+        # learns to detect "this edge exists in my graph" which doesn't transfer
+        # to held-out edges at val/test time.
+        n_msg = int(len(train_edges) * 0.85)
+        msg_edges = train_edges[:n_msg]
+        sup_edges = train_edges[n_msg:]
+
+        self._train_data = _make_split(sup_edges, msg_edges).to(self.device)
+        self._val_data = _make_split(val_edges, msg_edges).to(self.device)
+        self._test_data = _make_split(test_edges, msg_edges).to(self.device)
 
     # ---- Full-batch training (original) ----
 
