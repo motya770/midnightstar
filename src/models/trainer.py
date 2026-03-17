@@ -160,9 +160,10 @@ class Trainer:
             return loss.item()
 
         # GNN/Transformer: encode once, decode in batches
+        # Detach embeddings so we can backward per batch without retain_graph
         t0 = _time.time()
         print("[DEBUG] mini: encoding full graph...", end=" ", flush=True)
-        z = self.model.encode(train_data)
+        z = self.model.encode(train_data).detach().requires_grad_(True)
         print(f"{_time.time()-t0:.1f}s (z shape: {z.shape})", flush=True)
 
         pos_edge = train_data.edge_label_index
@@ -190,22 +191,34 @@ class Trainer:
         batch_pbar = tqdm(batch_iter, desc=f"  Batches", leave=False,
                           total=num_batches, unit="batch")
 
+        # Accumulate gradients on z across batches
+        if z.grad is not None:
+            z.grad.zero_()
+
         for start in batch_pbar:
             end = min(start + bs, all_src.size(0))
             batch_src = all_src[start:end]
             batch_dst = all_dst[start:end]
             batch_labels = all_labels[start:end]
 
-            self.optimizer.zero_grad()
             preds = self.model.decode(z, batch_src, batch_dst)
             loss = nn.functional.binary_cross_entropy(preds, batch_labels)
-            loss.backward(retain_graph=True)
-            self.optimizer.step()
+            loss.backward()
 
             total_loss += loss.item()
             batch_pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         batch_pbar.close()
+
+        # Now do a full encode backward using accumulated z.grad
+        print("[DEBUG] mini: encoder backward...", end=" ", flush=True)
+        t0 = _time.time()
+        self.optimizer.zero_grad()
+        z_fresh = self.model.encode(train_data)
+        z_fresh.backward(z.grad)
+        self.optimizer.step()
+        print(f"{_time.time()-t0:.1f}s", flush=True)
+
         return total_loss / max(num_batches, 1)
 
     def _eval_auc_mini(self, split_data) -> float:
