@@ -86,8 +86,16 @@ class GraphTransformerLinkPredictor(nn.Module):
 
     def encode(self, data):
         num_nodes = data.num_nodes if hasattr(data, "num_nodes") else data.x.size(0)
+        target_device = data.x.device
+
+        # RWSE uses sparse ops not supported on MPS — always compute on CPU
         with torch.no_grad():
-            pe = self.rwse(data.edge_index, num_nodes)
+            rwse_device = next(self.rwse.parameters()).device
+            self.rwse.cpu()
+            pe = self.rwse(data.edge_index.cpu(), num_nodes)
+            self.rwse.to(rwse_device)
+            pe = pe.to(target_device)
+
         x = torch.cat([data.x, pe], dim=-1)
         x = self.input_proj(x)
         for layer, norm in zip(self.layers, self.norms):
