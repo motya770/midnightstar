@@ -175,8 +175,8 @@ class Trainer:
         all_src = torch.cat([pos_src, neg_edge[0]])
         all_dst = torch.cat([pos_dst, neg_edge[1]])
         all_labels = torch.cat([
-            torch.ones(pos_src.size(0)),
-            torch.zeros(neg_edge[0].size(0)),
+            torch.ones(pos_src.size(0), device=self.device),
+            torch.zeros(neg_edge[0].size(0), device=self.device),
         ])
 
         # Shuffle edges
