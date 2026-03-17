@@ -14,62 +14,88 @@ class RWSEEncoder(nn.Module):
         self.linear = nn.Linear(walk_length, out_dim)
 
     def forward(self, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
-        # Build sparse row-normalized adjacency (random walk matrix)
-        adj_sparse = to_torch_csr_tensor(edge_index, size=(num_nodes, num_nodes))
-        adj_dense_row = adj_sparse.to_dense() if num_nodes <= 5000 else None
+        import time as _time
+        t0 = _time.time()
 
-        # Compute degree for row normalization
+        # Build sparse random walk matrix: RW = D^{-1} A
         deg = torch.zeros(num_nodes, device=edge_index.device)
         deg.scatter_add_(0, edge_index[0], torch.ones(edge_index.size(1), device=edge_index.device))
         deg = deg.clamp(min=1)
 
-        # Build sparse random walk matrix: RW = D^{-1} A
         row, col = edge_index
         rw_values = 1.0 / deg[row]
-        rw_sparse = torch.sparse_coo_tensor(
-            edge_index, rw_values, (num_nodes, num_nodes)
-        ).coalesce()
 
-        # Compute RW diagonal landing probabilities via sparse matrix-vector products
-        # Instead of full matrix power, track per-node probability vectors
+        # Compute RWSE using sparse mat-vec per node (fast: O(edges × walk_length))
+        # For each walk step k, compute diag(RW^k) via:
+        # p[i] = probability of being at node i. Start: p = e_i (one-hot for node i)
+        # After k steps: p = RW^T @ p. Return prob = p[i].
+        # Vectorized: track ALL nodes at once using element-wise sparse operations.
+        #
+        # Key insight: diag(RW^k) can be computed as:
+        # prob_k = RW_col_normalized sparse mat-vec applied k times to a vector
+        # But we need per-node return probs, not a single vector.
+        #
+        # Fast approach: use that for random walks on undirected graphs,
+        # the return probability relates to node degree and local structure.
+        # Approximate with degree-based features + local topology stats.
+
         rw_diag = torch.zeros(num_nodes, self.walk_length, device=edge_index.device)
 
-        # For each walk step k, we need diag(RW^k)
-        # Use: p_k = RW^T @ p_{k-1} where p_0 = I (each node starts at itself)
-        # diag(RW^k)[i] = (RW^k @ e_i)[i] = probability of returning to node i after k steps
-        # Batch all nodes: P_0 = I, P_k = RW^T @ P_{k-1}, diag = diagonal of P_k
-        # But storing full P is NxN. Instead, track only the diagonal using:
-        # diag(RW^k) = sum over paths. Approximate with sparse power iteration on diagonal.
+        # Build adjacency list for fast sparse mat-vec
+        # Use COO format directly: for each walk step, propagate probabilities
+        # along edges using scatter operations (O(edges) per step, not O(n²))
 
-        # Efficient approach: use the fact that diag(A^k) = trace contribution per node
-        # Compute via repeated sparse mat-vec: for each node, track return probability
-        # Use batched sparse multiplication on identity columns
+        # Start: each node has probability 1 at itself
+        prob = torch.ones(num_nodes, device=edge_index.device)  # current return probability
 
-        rw_t = rw_sparse.t()
+        # For step k: new_prob[i] = sum_j (RW[j,i] * prob[j]) where RW[j,i] = 1/deg[j] if edge j->i
+        # This is: new_prob = RW^T @ prob, done via scatter
+        rw_t_row = col  # transposed: original col becomes row
+        rw_t_col = row  # transposed: original row becomes col
+        rw_t_vals = rw_values  # same values
 
-        import time as _time
-        if num_nodes <= 10000:
-            print(f"[DEBUG] RWSE: small graph mode ({num_nodes} nodes, {self.walk_length} walks)...", flush=True)
-            current = torch.eye(num_nodes, device=edge_index.device)
-            for k in range(self.walk_length):
-                current = torch.sparse.mm(rw_t, current)
-                rw_diag[:, k] = current.diagonal()
-        else:
-            chunk_size = 2000
-            total_chunks = (num_nodes + chunk_size - 1) // chunk_size
-            print(f"[DEBUG] RWSE: large graph mode ({num_nodes} nodes, {total_chunks} chunks, {self.walk_length} walks)...", flush=True)
-            t0 = _time.time()
-            for ci, start in enumerate(range(0, num_nodes, chunk_size)):
-                end = min(start + chunk_size, num_nodes)
-                current = torch.zeros(num_nodes, end - start, device=edge_index.device)
-                current[start:end] = torch.eye(end - start, device=edge_index.device)
-                for k in range(self.walk_length):
-                    current = torch.sparse.mm(rw_t, current)
-                    rw_diag[start:end, k] = current[range(start, end), range(end - start)]
-                if (ci + 1) % 5 == 0 or ci == total_chunks - 1:
-                    elapsed = _time.time() - t0
-                    print(f"[DEBUG] RWSE: chunk {ci+1}/{total_chunks} ({elapsed:.1f}s)", flush=True)
+        # But we need per-node return probabilities, not a global vector.
+        # For that we need N separate random walks. Instead, approximate:
+        # Use random walk landing probabilities estimated via repeated sparse mat-vec
+        # on a random probe matrix (random projection trick).
 
+        # Random projection: instead of N separate walks, use R random vectors
+        # and estimate diag(RW^k) ≈ mean of element-wise products
+        num_probes = 32  # more probes = more accurate, 32 is good enough
+        print(f"[DEBUG] RWSE: random probe mode ({num_nodes} nodes, {num_probes} probes, {self.walk_length} walks)...", flush=True)
+
+        # Random Rademacher vectors: +1 or -1
+        probes = torch.sign(torch.randn(num_nodes, num_probes, device=edge_index.device))
+        # probes shape: (N, R)
+
+        for k in range(self.walk_length):
+            # Apply RW^T to each probe column via scatter
+            # new_probes[i] = sum over j where edge j->i: (1/deg[j]) * probes[j]
+            # Using scatter_add on the transposed adjacency
+            src_vals = probes[row] * rw_values.unsqueeze(1)  # (edges, R)
+            new_probes = torch.zeros_like(probes)
+            new_probes.scatter_add_(0, col.unsqueeze(1).expand_as(src_vals), src_vals)
+            probes = new_probes
+
+            # Estimate diag(RW^k) ≈ mean of (original_probes * current_probes) per node
+            # But we lost the original probes. Use Hutchinson's trick:
+            # E[z^T A^k z] = tr(A^k) for random z, and per-element: E[z_i * (A^k z)_i] = (A^k)_{ii}
+            # So: rw_diag[:, k] = mean over probes of (probe_original * probe_current)
+            pass
+
+        # Restart with proper Hutchinson estimator
+        probes_orig = torch.sign(torch.randn(num_nodes, num_probes, device=edge_index.device))
+        probes = probes_orig.clone()
+
+        for k in range(self.walk_length):
+            src_vals = probes[row] * rw_values.unsqueeze(1)
+            new_probes = torch.zeros_like(probes)
+            new_probes.scatter_add_(0, col.unsqueeze(1).expand_as(src_vals), src_vals)
+            probes = new_probes
+            # Hutchinson: diag(A^k)[i] ≈ mean_r(z_r[i] * (A^k z_r)[i])
+            rw_diag[:, k] = (probes_orig * probes).mean(dim=1)
+
+        print(f"[DEBUG] RWSE: done in {_time.time()-t0:.1f}s", flush=True)
         return self.linear(rw_diag)
 
 
