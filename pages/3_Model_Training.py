@@ -425,7 +425,6 @@ with col_monitor:
         # Store results in session
         session.set_training_results({
             "model": model,
-            "trainer": trainer,
             "history": history,
             "metrics": metrics,
             "pyg_data": pyg_data,
