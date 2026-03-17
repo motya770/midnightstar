@@ -61,6 +61,9 @@ def _do_train(model_class_name: str, model_kwargs: dict,
         val_ratio=config_dict["val_ratio"],
         early_stopping=config_dict.get("early_stopping", False),
         patience=config_dict.get("patience", 10),
+        mini_batch=config_dict.get("mini_batch", False),
+        batch_size=config_dict.get("batch_size", 512),
+        edge_dropout=config_dict.get("edge_dropout", 0.3),
         device=str(device),
     )
     trainer = Trainer(model, config)

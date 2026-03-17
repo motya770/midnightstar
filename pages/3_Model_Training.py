@@ -223,12 +223,14 @@ with col_config:
         hidden_dim = st.select_slider("Hidden dimension", [32, 64, 128, 256, 512], value=64)
         num_heads = st.select_slider("Attention heads", [1, 2, 4, 8], value=4)
         rwse_k = st.slider("RWSE walk length (k)", 8, 24, 16)
+        rwse_probes = st.select_slider("RWSE probes (accuracy)", [32, 64, 128, 256, 512], value=256,
+                                        help="More probes = more accurate positional encodings. 256 is recommended for large graphs.")
         with st.expander("What does this do?"):
             st.markdown("**Graph Transformer** uses attention to weigh which gene connections matter most. "
                        "It can detect longer-range patterns than GNN by looking at broader neighborhoods.")
     else:  # VAE
-        hidden_dim = st.select_slider("Hidden dimension", [16, 32, 64, 128], value=64)
-        latent_dim = st.select_slider("Latent dimension", [8, 16, 32, 64, 128], value=32)
+        hidden_dim = st.select_slider("Hidden dimension", [16, 32, 64, 128, 256, 512], value=64)
+        latent_dim = st.select_slider("Latent dimension", [8, 16, 32, 64, 128, 256], value=32)
         num_layers = st.slider("Encoder layers", 1, 4, 2)
         beta = st.slider("Beta (KL weight)", 0.1, 10.0, 1.0, 0.1)
         with st.expander("What does this do?"):
@@ -244,7 +246,7 @@ with col_config:
     batch_size = 512
     num_neighbors = None
     if mini_batch:
-        batch_size = st.select_slider("Batch size (edges)", [128, 256, 512, 1024, 2048], value=512)
+        batch_size = st.select_slider("Batch size (edges)", [16, 32, 64, 128, 256, 512, 1024, 2048], value=512)
         edge_dropout = st.slider("Edge dropout", 0.0, 0.7, 0.3, 0.05,
                                   help="Fraction of edges randomly dropped during encode each epoch. "
                                        "Prevents overfitting. 0.3 = drop 30% of edges.")
@@ -287,7 +289,8 @@ with col_monitor:
             model_class = "GraphTransformerLinkPredictor"
             model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
                                 num_layers=num_layers, num_heads=num_heads,
-                                rwse_dim=16, rwse_walk_length=rwse_k)
+                                rwse_dim=16, rwse_walk_length=rwse_k,
+                                rwse_probes=rwse_probes)
             params_str = f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, lr={lr}, epochs={epochs}"
         else:
             model_class = "GraphVAE"
