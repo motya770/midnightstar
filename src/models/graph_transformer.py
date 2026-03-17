@@ -47,28 +47,28 @@ class RWSEEncoder(nn.Module):
 
         rw_t = rw_sparse.t()
 
+        import time as _time
         if num_nodes <= 10000:
-            # For moderate graphs: batch sparse matmul
-            # P shape: (num_nodes, num_nodes), start as identity
-            # Track as dense but operate with sparse RW
+            print(f"[DEBUG] RWSE: small graph mode ({num_nodes} nodes, {self.walk_length} walks)...", flush=True)
             current = torch.eye(num_nodes, device=edge_index.device)
             for k in range(self.walk_length):
                 current = torch.sparse.mm(rw_t, current)
                 rw_diag[:, k] = current.diagonal()
         else:
-            # For large graphs: sample-based approximation
-            # Process nodes in chunks to avoid OOM
             chunk_size = 2000
-            for start in range(0, num_nodes, chunk_size):
+            total_chunks = (num_nodes + chunk_size - 1) // chunk_size
+            print(f"[DEBUG] RWSE: large graph mode ({num_nodes} nodes, {total_chunks} chunks, {self.walk_length} walks)...", flush=True)
+            t0 = _time.time()
+            for ci, start in enumerate(range(0, num_nodes, chunk_size)):
                 end = min(start + chunk_size, num_nodes)
-                # Start with indicator vectors for this chunk
                 current = torch.zeros(num_nodes, end - start, device=edge_index.device)
                 current[start:end] = torch.eye(end - start, device=edge_index.device)
                 for k in range(self.walk_length):
                     current = torch.sparse.mm(rw_t, current)
-                    # Extract diagonal: for node i in [start, end), its return prob is current[i, i-start]
-                    for local_i, global_i in enumerate(range(start, end)):
-                        rw_diag[global_i, k] = current[global_i, local_i]
+                    rw_diag[start:end, k] = current[range(start, end), range(end - start)]
+                if (ci + 1) % 5 == 0 or ci == total_chunks - 1:
+                    elapsed = _time.time() - t0
+                    print(f"[DEBUG] RWSE: chunk {ci+1}/{total_chunks} ({elapsed:.1f}s)", flush=True)
 
         return self.linear(rw_diag)
 
@@ -85,22 +85,34 @@ class GraphTransformerLinkPredictor(nn.Module):
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_channels) for _ in range(num_layers)])
 
     def encode(self, data):
+        import time as _time
         num_nodes = data.num_nodes if hasattr(data, "num_nodes") else data.x.size(0)
         target_device = data.x.device
 
         # RWSE uses sparse ops not supported on MPS — always compute on CPU
+        t0 = _time.time()
+        print(f"[DEBUG] encode: RWSE ({num_nodes} nodes)...", end=" ", flush=True)
         with torch.no_grad():
             rwse_device = next(self.rwse.parameters()).device
             self.rwse.cpu()
             pe = self.rwse(data.edge_index.cpu(), num_nodes)
             self.rwse.to(rwse_device)
             pe = pe.to(target_device)
+        print(f"{_time.time()-t0:.1f}s", flush=True)
 
+        t0 = _time.time()
+        print("[DEBUG] encode: input_proj...", end=" ", flush=True)
         x = torch.cat([data.x, pe], dim=-1)
         x = self.input_proj(x)
-        for layer, norm in zip(self.layers, self.norms):
+        print(f"{_time.time()-t0:.1f}s", flush=True)
+
+        for i, (layer, norm) in enumerate(zip(self.layers, self.norms)):
+            t0 = _time.time()
+            print(f"[DEBUG] encode: TransformerConv layer {i}...", end=" ", flush=True)
             x = norm(x + layer(x, data.edge_index))
             x = torch.relu(x)
+            print(f"{_time.time()-t0:.1f}s", flush=True)
+
         return x
 
     def decode(self, z, src, dst):

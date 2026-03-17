@@ -100,6 +100,7 @@ class Trainer:
     # ---- Full-batch training (original) ----
 
     def _train_step_full(self) -> float:
+        import time as _time
         self.model.train()
         self.optimizer.zero_grad()
         train_data = self._train_data
@@ -107,6 +108,8 @@ class Trainer:
         if self._is_vae:
             loss = self.model.loss(train_data.x, train_data.edge_index)
         else:
+            t0 = _time.time()
+            print("[DEBUG] full: forward pass...", end=" ", flush=True)
             pos_edge = train_data.edge_label_index
             pos_src, pos_dst = pos_edge[0], pos_edge[1]
 
@@ -120,15 +123,19 @@ class Trainer:
             src = torch.cat([pos_src, neg_src])
             dst = torch.cat([pos_dst, neg_dst])
             labels = torch.cat([
-                torch.ones(pos_src.size(0)),
-                torch.zeros(neg_src.size(0)),
+                torch.ones(pos_src.size(0), device=self.device),
+                torch.zeros(neg_src.size(0), device=self.device),
             ])
 
             preds = self.model(train_data, src, dst)
+            print(f"{_time.time()-t0:.1f}s", flush=True)
+            t0 = _time.time()
+            print("[DEBUG] full: loss + backward...", end=" ", flush=True)
             loss = nn.functional.binary_cross_entropy(preds, labels)
 
         loss.backward()
         self.optimizer.step()
+        print(f"{_time.time()-t0:.1f}s", flush=True)
         return loss.item()
 
     # ---- Mini-batch training (edge chunking) ----
@@ -139,13 +146,13 @@ class Trainer:
     # For the encode step, we use torch.no_grad() caching + gradient checkpointing.
 
     def _train_step_mini(self) -> float:
+        import time as _time
         self.model.train()
         train_data = self._train_data
         bs = self.config.batch_size
 
         # Full encode (shared across all edge batches)
         if self._is_vae:
-            # VAE: just chunk the loss computation
             loss = self.model.loss(train_data.x, train_data.edge_index)
             self.optimizer.zero_grad()
             loss.backward()
@@ -153,7 +160,10 @@ class Trainer:
             return loss.item()
 
         # GNN/Transformer: encode once, decode in batches
+        t0 = _time.time()
+        print("[DEBUG] mini: encoding full graph...", end=" ", flush=True)
         z = self.model.encode(train_data)
+        print(f"{_time.time()-t0:.1f}s (z shape: {z.shape})", flush=True)
 
         pos_edge = train_data.edge_label_index
         pos_src, pos_dst = pos_edge[0], pos_edge[1]
@@ -260,7 +270,14 @@ class Trainer:
     # ---- Main train/evaluate ----
 
     def train(self, data, on_epoch=None) -> dict:
+        import time as _time
+        t0 = _time.time()
+        print(f"[DEBUG] Splitting data ({data.num_nodes} nodes, {data.edge_index.size(1)} edges)...")
         self._split_data(data)
+        print(f"[DEBUG] Split done in {_time.time()-t0:.1f}s — train: {self._train_data.edge_index.size(1)} edges, "
+              f"val: {self._val_data.edge_label_index.size(1)} labels, "
+              f"test: {self._test_data.edge_label_index.size(1)} labels")
+        print(f"[DEBUG] Device: {self.device}, mini_batch: {self.config.mini_batch}, bs: {self.config.batch_size}")
 
         use_mini = self.config.mini_batch
         train_step = self._train_step_mini if use_mini else self._train_step_full
