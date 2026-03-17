@@ -13,31 +13,17 @@ class RWSEEncoder(nn.Module):
         self.walk_length = walk_length
         self.linear = nn.Linear(walk_length, out_dim)
 
-    def forward(self, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    def compute_rw_diag(self, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+        """Compute raw random walk return probabilities (no gradients needed)."""
         import time as _time
         t0 = _time.time()
 
-        # Build sparse random walk matrix: RW = D^{-1} A
         deg = torch.zeros(num_nodes, device=edge_index.device)
         deg.scatter_add_(0, edge_index[0], torch.ones(edge_index.size(1), device=edge_index.device))
         deg = deg.clamp(min=1)
 
         row, col = edge_index
         rw_values = 1.0 / deg[row]
-
-        # Compute RWSE using sparse mat-vec per node (fast: O(edges × walk_length))
-        # For each walk step k, compute diag(RW^k) via:
-        # p[i] = probability of being at node i. Start: p = e_i (one-hot for node i)
-        # After k steps: p = RW^T @ p. Return prob = p[i].
-        # Vectorized: track ALL nodes at once using element-wise sparse operations.
-        #
-        # Key insight: diag(RW^k) can be computed as:
-        # prob_k = RW_col_normalized sparse mat-vec applied k times to a vector
-        # But we need per-node return probs, not a single vector.
-        #
-        # Fast approach: use that for random walks on undirected graphs,
-        # the return probability relates to node degree and local structure.
-        # Approximate with degree-based features + local topology stats.
 
         rw_diag = torch.zeros(num_nodes, self.walk_length, device=edge_index.device)
 
@@ -54,10 +40,13 @@ class RWSEEncoder(nn.Module):
             new_probes = torch.zeros_like(probes)
             new_probes.scatter_add_(0, col.unsqueeze(1).expand_as(src_vals), src_vals)
             probes = new_probes
-            # Hutchinson: diag(A^k)[i] ≈ mean_r(z_r[i] * (A^k z_r)[i])
             rw_diag[:, k] = (probes_orig * probes).mean(dim=1)
 
         print(f"[DEBUG] RWSE: done in {_time.time()-t0:.1f}s", flush=True)
+        return rw_diag
+
+    def forward(self, rw_diag: torch.Tensor) -> torch.Tensor:
+        """Project cached walk probabilities through trainable linear layer."""
         return self.linear(rw_diag)
 
 
@@ -71,25 +60,39 @@ class GraphTransformerLinkPredictor(nn.Module):
         for _ in range(num_layers):
             self.layers.append(TransformerConv(hidden_channels, hidden_channels // num_heads, heads=num_heads))
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_channels) for _ in range(num_layers)])
+        self._rw_diag_cache = None  # cached raw walk probabilities
+
+    def precompute_rwse(self, data):
+        """Compute and cache RWSE walk probabilities. Call once before training."""
+        import time as _time
+        num_nodes = data.num_nodes if hasattr(data, "num_nodes") else data.x.size(0)
+        t0 = _time.time()
+        print(f"[DEBUG] precompute_rwse: RWSE ({num_nodes} nodes)...", end=" ", flush=True)
+        with torch.no_grad():
+            rw_diag = self.rwse.compute_rw_diag(data.edge_index.cpu(), num_nodes)
+        self._rw_diag_cache = rw_diag.to(data.x.device)
+        print(f"{_time.time()-t0:.1f}s (cached)", flush=True)
 
     def encode(self, data):
         import time as _time
         num_nodes = data.num_nodes if hasattr(data, "num_nodes") else data.x.size(0)
         target_device = data.x.device
 
-        # RWSE uses sparse ops not supported on MPS — always compute on CPU
-        t0 = _time.time()
-        print(f"[DEBUG] encode: RWSE ({num_nodes} nodes)...", end=" ", flush=True)
-        with torch.no_grad():
-            rwse_device = next(self.rwse.parameters()).device
-            self.rwse.cpu()
-            pe = self.rwse(data.edge_index.cpu(), num_nodes)
-            self.rwse.to(rwse_device)
-            pe = pe.to(target_device)
-        print(f"{_time.time()-t0:.1f}s", flush=True)
+        # Use cached walk probabilities if available, otherwise compute
+        if self._rw_diag_cache is not None and self._rw_diag_cache.size(0) == num_nodes:
+            rw_diag = self._rw_diag_cache.to(target_device)
+        else:
+            t0 = _time.time()
+            print(f"[DEBUG] encode: RWSE ({num_nodes} nodes, no cache)...", end=" ", flush=True)
+            with torch.no_grad():
+                rw_diag = self.rwse.compute_rw_diag(data.edge_index.cpu(), num_nodes)
+            rw_diag = rw_diag.to(target_device)
+            print(f"{_time.time()-t0:.1f}s", flush=True)
 
+        # Linear projection (trainable — receives gradients)
         t0 = _time.time()
-        print("[DEBUG] encode: input_proj...", end=" ", flush=True)
+        print("[DEBUG] encode: RWSE proj + input_proj...", end=" ", flush=True)
+        pe = self.rwse(rw_diag)
         x = torch.cat([data.x, pe], dim=-1)
         x = self.input_proj(x)
         print(f"{_time.time()-t0:.1f}s", flush=True)

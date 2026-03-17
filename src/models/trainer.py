@@ -321,6 +321,10 @@ class Trainer:
               f"test: {self._test_data.edge_label_index.size(1)} labels")
         print(f"[DEBUG] Device: {self.device}, mini_batch: {self.config.mini_batch}, bs: {self.config.batch_size}")
 
+        # Precompute RWSE once if the model supports it (graph structure is fixed)
+        if hasattr(self.model, 'precompute_rwse'):
+            self.model.precompute_rwse(self._train_data)
+
         use_mini = self.config.mini_batch
         train_step = self._train_step_mini if use_mini else self._train_step_full
         eval_auc = self._eval_auc_mini if use_mini else self._eval_auc_full
