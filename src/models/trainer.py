@@ -2,10 +2,11 @@
 from dataclasses import dataclass
 from typing import Any
 
+import random
+
 import torch
 import torch.nn as nn
 from torch_geometric.data import Data
-from torch_geometric.transforms import RandomLinkSplit
 from torch_geometric.utils import negative_sampling
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
@@ -40,16 +41,61 @@ class Trainer:
         self._test_data = None
 
     def _split_data(self, data):
+        """Manual edge-level split without RandomLinkSplit (avoids pyg-lib dependency)."""
+        edge_index = data.edge_index
+        # Get unique undirected edges
+        edge_set = set()
+        edges = []
+        for i in range(edge_index.size(1)):
+            src, dst = edge_index[0, i].item(), edge_index[1, i].item()
+            key = (min(src, dst), max(src, dst))
+            if key not in edge_set:
+                edge_set.add(key)
+                edges.append(key)
+
+        random.shuffle(edges)
+        n = len(edges)
+        n_train = int(n * self.config.train_ratio)
         test_ratio = max(0.01, 1.0 - self.config.train_ratio - self.config.val_ratio)
-        transform = RandomLinkSplit(
-            num_val=self.config.val_ratio,
-            num_test=test_ratio,
-            add_negative_train_samples=False,
-        )
-        train, val, test = transform(data)
-        self._train_data = train.to(self.device)
-        self._val_data = val.to(self.device)
-        self._test_data = test.to(self.device)
+        n_val = int(n * self.config.val_ratio)
+
+        train_edges = edges[:n_train]
+        val_edges = edges[n_train:n_train + n_val]
+        test_edges = edges[n_train + n_val:]
+
+        def _to_undirected(edge_list):
+            if not edge_list:
+                return torch.zeros((2, 0), dtype=torch.long)
+            src = [e[0] for e in edge_list]
+            dst = [e[1] for e in edge_list]
+            return torch.tensor([src + dst, dst + src], dtype=torch.long)
+
+        def _make_split(edge_list, msg_edges):
+            """Create a Data object with edge_index (for message passing) and
+            edge_label_index + edge_label (for supervision)."""
+            ei = _to_undirected(msg_edges)
+            # Positive supervision edges
+            pos_src = torch.tensor([e[0] for e in edge_list], dtype=torch.long)
+            pos_dst = torch.tensor([e[1] for e in edge_list], dtype=torch.long)
+            # Negative supervision edges
+            neg = negative_sampling(ei, num_nodes=data.num_nodes,
+                                    num_neg_samples=len(edge_list))
+            neg_src, neg_dst = neg[0], neg[1]
+            # Combine
+            label_src = torch.cat([pos_src, neg_src])
+            label_dst = torch.cat([pos_dst, neg_dst])
+            labels = torch.cat([torch.ones(len(edge_list)), torch.zeros(neg_src.size(0))])
+            return Data(
+                x=data.x, edge_index=ei, num_nodes=data.num_nodes,
+                edge_label_index=torch.stack([label_src, label_dst]),
+                edge_label=labels,
+            )
+
+        # Train split sees only train edges for message passing
+        # Val/test see train edges for message passing but are scored on held-out edges
+        self._train_data = _make_split(train_edges, train_edges).to(self.device)
+        self._val_data = _make_split(val_edges, train_edges).to(self.device)
+        self._test_data = _make_split(test_edges, train_edges).to(self.device)
 
     # ---- Full-batch training (original) ----
 
