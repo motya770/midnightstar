@@ -8,9 +8,10 @@ from torch_geometric.utils import to_torch_csr_tensor
 class RWSEEncoder(nn.Module):
     """Random Walk Structural Encoding using sparse matrix operations."""
 
-    def __init__(self, walk_length: int = 16, out_dim: int = 8):
+    def __init__(self, walk_length: int = 16, out_dim: int = 8, num_probes: int = 256):
         super().__init__()
         self.walk_length = walk_length
+        self.num_probes = num_probes
         self.linear = nn.Linear(walk_length, out_dim)
 
     def compute_rw_diag(self, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -29,7 +30,7 @@ class RWSEEncoder(nn.Module):
 
         # Hutchinson estimator: approximate diag(RW^k) using random Rademacher probes
         # E[z_i * (RW^k z)_i] = (RW^k)_{ii} = return probability at step k
-        num_probes = 32
+        num_probes = self.num_probes
         print(f"[DEBUG] RWSE: random probe mode ({num_nodes} nodes, {num_probes} probes, {self.walk_length} walks)...", flush=True)
 
         probes_orig = torch.sign(torch.randn(num_nodes, num_probes, device=edge_index.device))
@@ -52,9 +53,10 @@ class RWSEEncoder(nn.Module):
 
 class GraphTransformerLinkPredictor(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int = 64, num_layers: int = 2,
-                 num_heads: int = 4, rwse_dim: int = 16, rwse_walk_length: int = 16):
+                 num_heads: int = 4, rwse_dim: int = 16, rwse_walk_length: int = 16,
+                 rwse_probes: int = 256):
         super().__init__()
-        self.rwse = RWSEEncoder(walk_length=rwse_walk_length, out_dim=rwse_dim)
+        self.rwse = RWSEEncoder(walk_length=rwse_walk_length, out_dim=rwse_dim, num_probes=rwse_probes)
         self.input_proj = nn.Linear(in_channels + rwse_dim, hidden_channels)
         self.layers = nn.ModuleList()
         for _ in range(num_layers):

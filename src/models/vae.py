@@ -1,7 +1,7 @@
 # src/models/vae.py
 import torch
 import torch.nn as nn
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import SAGEConv
 from torch_geometric.utils import negative_sampling
 
 
@@ -11,9 +11,9 @@ class GraphVAE(nn.Module):
         super().__init__()
         self.beta = beta
         self.encoder_layers = nn.ModuleList()
-        self.encoder_layers.append(GCNConv(in_channels, hidden_channels))
+        self.encoder_layers.append(SAGEConv(in_channels, hidden_channels))
         for _ in range(num_layers - 1):
-            self.encoder_layers.append(GCNConv(hidden_channels, hidden_channels))
+            self.encoder_layers.append(SAGEConv(hidden_channels, hidden_channels))
         self.fc_mu = nn.Linear(hidden_channels, latent_dim)
         self.fc_logvar = nn.Linear(hidden_channels, latent_dim)
 
