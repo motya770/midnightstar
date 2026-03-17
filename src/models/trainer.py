@@ -30,7 +30,7 @@ class TrainConfig:
 class Trainer:
     def __init__(self, model: nn.Module, config: TrainConfig):
         self.config = config
-        self._is_vae = hasattr(model, "loss") and hasattr(model, "predict_links")
+        self._has_kl = hasattr(model, "kl_loss")
 
         # Set device
         self.device = torch.device(config.device)
@@ -112,44 +112,44 @@ class Trainer:
         self.optimizer.zero_grad()
         train_data = self._train_data
 
-        if self._is_vae:
-            loss = self.model.loss(train_data.x, train_data.edge_index)
-        else:
+        t0 = _time.time()
+        print("[DEBUG] full: forward pass...", end=" ", flush=True)
+        # Extract only positive edges from the split (edge_label_index contains both pos and neg)
+        pos_mask = train_data.edge_label == 1
+        pos_src = train_data.edge_label_index[0][pos_mask]
+        pos_dst = train_data.edge_label_index[1][pos_mask]
+
+        # Fresh negative samples each epoch for variety
+        neg_edge = negative_sampling(
+            edge_index=train_data.edge_index,
+            num_nodes=train_data.num_nodes,
+            num_neg_samples=pos_src.size(0),
+        )
+        neg_src, neg_dst = neg_edge[0], neg_edge[1]
+
+        src = torch.cat([pos_src, neg_src])
+        dst = torch.cat([pos_dst, neg_dst])
+        labels = torch.cat([
+            torch.ones(pos_src.size(0), device=self.device),
+            torch.zeros(neg_src.size(0), device=self.device),
+        ])
+
+        if hasattr(self.model, 'decode_logits'):
+            z = self.model.encode(train_data)
+            logits = self.model.decode_logits(z, src, dst)
+            print(f"{_time.time()-t0:.1f}s", flush=True)
             t0 = _time.time()
-            print("[DEBUG] full: forward pass...", end=" ", flush=True)
-            # Extract only positive edges from the split (edge_label_index contains both pos and neg)
-            pos_mask = train_data.edge_label == 1
-            pos_src = train_data.edge_label_index[0][pos_mask]
-            pos_dst = train_data.edge_label_index[1][pos_mask]
+            print("[DEBUG] full: loss + backward...", end=" ", flush=True)
+            loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
+        else:
+            preds = self.model(train_data, src, dst)
+            print(f"{_time.time()-t0:.1f}s", flush=True)
+            t0 = _time.time()
+            print("[DEBUG] full: loss + backward...", end=" ", flush=True)
+            loss = nn.functional.binary_cross_entropy(preds, labels)
 
-            # Fresh negative samples each epoch for variety
-            neg_edge = negative_sampling(
-                edge_index=train_data.edge_index,
-                num_nodes=train_data.num_nodes,
-                num_neg_samples=pos_src.size(0),
-            )
-            neg_src, neg_dst = neg_edge[0], neg_edge[1]
-
-            src = torch.cat([pos_src, neg_src])
-            dst = torch.cat([pos_dst, neg_dst])
-            labels = torch.cat([
-                torch.ones(pos_src.size(0), device=self.device),
-                torch.zeros(neg_src.size(0), device=self.device),
-            ])
-
-            if hasattr(self.model, 'decode_logits'):
-                z = self.model.encode(train_data)
-                logits = self.model.decode_logits(z, src, dst)
-                print(f"{_time.time()-t0:.1f}s", flush=True)
-                t0 = _time.time()
-                print("[DEBUG] full: loss + backward...", end=" ", flush=True)
-                loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
-            else:
-                preds = self.model(train_data, src, dst)
-                print(f"{_time.time()-t0:.1f}s", flush=True)
-                t0 = _time.time()
-                print("[DEBUG] full: loss + backward...", end=" ", flush=True)
-                loss = nn.functional.binary_cross_entropy(preds, labels)
+        if self._has_kl:
+            loss = loss + self.model.beta * self.model.kl_loss()
 
         loss.backward()
         self.optimizer.step()
@@ -169,15 +169,7 @@ class Trainer:
         train_data = self._train_data
         bs = self.config.batch_size
 
-        # Full encode (shared across all edge batches)
-        if self._is_vae:
-            loss = self.model.loss(train_data.x, train_data.edge_index)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-            return loss.item()
-
-        # GNN/Transformer: encode with edge dropout, decode in batches
+        # GNN/Transformer/VAE: encode with edge dropout, decode in batches
         # Edge dropout: randomly mask edges during encode so the model can't memorize
         t0 = _time.time()
         dropout = self.config.edge_dropout
@@ -250,6 +242,9 @@ class Trainer:
         t0 = _time.time()
         self.optimizer.zero_grad()
         z_fresh = self.model.encode(dropped_data)
+        if self._has_kl:
+            kl = self.model.beta * self.model.kl_loss()
+            kl.backward(retain_graph=True)
         z_fresh.backward(z.grad)
         self.optimizer.step()
         print(f"{_time.time()-t0:.1f}s", flush=True)
@@ -265,25 +260,13 @@ class Trainer:
             src, dst = edge_label_index[0], edge_label_index[1]
             labels = split_data.edge_label.float()
 
-            if self._is_vae:
-                # Chunk predict_links
-                all_scores = []
-                for start in range(0, src.size(0), bs):
-                    end = min(start + bs, src.size(0))
-                    scores = self.model.predict_links(
-                        split_data.x, split_data.edge_index,
-                        src[start:end], dst[start:end]
-                    )
-                    all_scores.append(scores)
-                all_scores = torch.cat(all_scores).cpu().numpy()
-            else:
-                z = self.model.encode(split_data)
-                all_scores = []
-                for start in range(0, src.size(0), bs):
-                    end = min(start + bs, src.size(0))
-                    scores = self.model.decode(z, src[start:end], dst[start:end])
-                    all_scores.append(scores)
-                all_scores = torch.cat(all_scores).cpu().numpy()
+            z = self.model.encode(split_data)
+            all_scores = []
+            for start in range(0, src.size(0), bs):
+                end = min(start + bs, src.size(0))
+                scores = self.model.decode(z, src[start:end], dst[start:end])
+                all_scores.append(scores)
+            all_scores = torch.cat(all_scores).cpu().numpy()
 
             labels = labels.cpu().numpy()
 
@@ -303,8 +286,9 @@ class Trainer:
             src, dst = edge_label_index[0], edge_label_index[1]
             labels = split_data.edge_label.float().cpu().numpy()
 
-            if self._is_vae:
-                scores = self.model.predict_links(split_data.x, split_data.edge_index, src, dst).cpu().numpy()
+            if hasattr(self.model, 'decode_logits'):
+                z = self.model.encode(split_data)
+                scores = torch.sigmoid(self.model.decode_logits(z, src, dst)).cpu().numpy()
             else:
                 scores = self.model(split_data, src, dst).cpu().numpy()
 
@@ -381,10 +365,9 @@ class Trainer:
             src, dst = edge_label_index[0], edge_label_index[1]
             labels = self._test_data.edge_label.float().cpu().numpy()
 
-            if self._is_vae:
-                scores = self.model.predict_links(
-                    self._test_data.x, self._test_data.edge_index, src, dst
-                ).cpu().numpy()
+            if hasattr(self.model, 'decode_logits'):
+                z = self.model.encode(self._test_data)
+                scores = torch.sigmoid(self.model.decode_logits(z, src, dst)).cpu().numpy()
             else:
                 scores = self.model(self._test_data, src, dst).cpu().numpy()
 
@@ -406,24 +389,13 @@ class Trainer:
             dst = test_data.edge_label_index[1]
             labels = test_data.edge_label.float()
 
-            if self._is_vae:
-                all_scores = []
-                for start in range(0, src.size(0), bs):
-                    end = min(start + bs, src.size(0))
-                    scores = self.model.predict_links(
-                        test_data.x, test_data.edge_index,
-                        src[start:end], dst[start:end]
-                    )
-                    all_scores.append(scores)
-                all_scores = torch.cat(all_scores).cpu().numpy()
-            else:
-                z = self.model.encode(test_data)
-                all_scores = []
-                for start in range(0, src.size(0), bs):
-                    end = min(start + bs, src.size(0))
-                    scores = self.model.decode(z, src[start:end], dst[start:end])
-                    all_scores.append(scores)
-                all_scores = torch.cat(all_scores).cpu().numpy()
+            z = self.model.encode(test_data)
+            all_scores = []
+            for start in range(0, src.size(0), bs):
+                end = min(start + bs, src.size(0))
+                scores = self.model.decode(z, src[start:end], dst[start:end])
+                all_scores.append(scores)
+            all_scores = torch.cat(all_scores).cpu().numpy()
 
             labels = labels.cpu().numpy()
 

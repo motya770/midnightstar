@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GCNConv
-from torch_geometric.utils import to_dense_adj
+from torch_geometric.utils import negative_sampling
 
 
 class GraphVAE(nn.Module):
@@ -17,36 +17,40 @@ class GraphVAE(nn.Module):
         self.fc_mu = nn.Linear(hidden_channels, latent_dim)
         self.fc_logvar = nn.Linear(hidden_channels, latent_dim)
 
-    def encode(self, x, edge_index):
+    def _encode_raw(self, x, edge_index):
         h = x
         for layer in self.encoder_layers:
             h = torch.relu(layer(h, edge_index))
         return self.fc_mu(h), self.fc_logvar(h)
+
+    def encode(self, data):
+        """Encode returning z (reparameterized). Stores mu/logvar for KL loss."""
+        mu, logvar = self._encode_raw(data.x, data.edge_index)
+        self._mu = mu
+        self._logvar = logvar
+        return self.reparameterize(mu, logvar)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z):
-        return torch.sigmoid(z @ z.t())
+    def decode(self, z, src, dst):
+        """Edge-level decode — returns probabilities for given edges."""
+        return torch.sigmoid((z[src] * z[dst]).sum(dim=-1))
 
-    def forward(self, x, edge_index):
-        mu, logvar = self.encode(x, edge_index)
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z), mu, logvar
+    def decode_logits(self, z, src, dst):
+        """Edge-level decode — returns raw logits for given edges."""
+        return (z[src] * z[dst]).sum(dim=-1)
 
-    def loss(self, x, edge_index):
-        adj_pred, mu, logvar = self.forward(x, edge_index)
-        adj_true = to_dense_adj(edge_index, max_num_nodes=x.size(0)).squeeze(0)
-        recon_loss = nn.functional.binary_cross_entropy(adj_pred, adj_true)
-        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-        return recon_loss + self.beta * kl_loss
+    def kl_loss(self):
+        """KL divergence from the most recent encode call."""
+        return -0.5 * torch.mean(1 + self._logvar - self._mu.pow(2) - self._logvar.exp())
 
     def predict_links(self, x, edge_index, src, dst):
-        mu, _ = self.encode(x, edge_index)
+        mu, _ = self._encode_raw(x, edge_index)
         return torch.sigmoid((mu[src] * mu[dst]).sum(dim=-1))
 
     def get_embeddings(self, x, edge_index):
-        mu, _ = self.encode(x, edge_index)
+        mu, _ = self._encode_raw(x, edge_index)
         return mu.detach()
