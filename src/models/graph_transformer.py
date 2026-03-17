@@ -103,8 +103,11 @@ class GraphTransformerLinkPredictor(nn.Module):
 
         return x
 
+    def decode_logits(self, z, src, dst):
+        return (z[src] * z[dst]).sum(dim=-1)
+
     def decode(self, z, src, dst):
-        return torch.sigmoid((z[src] * z[dst]).sum(dim=-1))
+        return torch.sigmoid(self.decode_logits(z, src, dst))
 
     def forward(self, data, src, dst):
         z = self.encode(data)

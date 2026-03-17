@@ -131,11 +131,19 @@ class Trainer:
                 torch.zeros(neg_src.size(0), device=self.device),
             ])
 
-            preds = self.model(train_data, src, dst)
-            print(f"{_time.time()-t0:.1f}s", flush=True)
-            t0 = _time.time()
-            print("[DEBUG] full: loss + backward...", end=" ", flush=True)
-            loss = nn.functional.binary_cross_entropy(preds, labels)
+            if hasattr(self.model, 'decode_logits'):
+                z = self.model.encode(train_data)
+                logits = self.model.decode_logits(z, src, dst)
+                print(f"{_time.time()-t0:.1f}s", flush=True)
+                t0 = _time.time()
+                print("[DEBUG] full: loss + backward...", end=" ", flush=True)
+                loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
+            else:
+                preds = self.model(train_data, src, dst)
+                print(f"{_time.time()-t0:.1f}s", flush=True)
+                t0 = _time.time()
+                print("[DEBUG] full: loss + backward...", end=" ", flush=True)
+                loss = nn.functional.binary_cross_entropy(preds, labels)
 
         loss.backward()
         self.optimizer.step()
@@ -218,8 +226,12 @@ class Trainer:
             batch_dst = all_dst[start:end]
             batch_labels = all_labels[start:end]
 
-            preds = self.model.decode(z, batch_src, batch_dst)
-            loss = nn.functional.binary_cross_entropy(preds, batch_labels)
+            if hasattr(self.model, 'decode_logits'):
+                logits = self.model.decode_logits(z, batch_src, batch_dst)
+                loss = nn.functional.binary_cross_entropy_with_logits(logits, batch_labels)
+            else:
+                preds = self.model.decode(z, batch_src, batch_dst)
+                loss = nn.functional.binary_cross_entropy(preds, batch_labels)
             loss.backward()
 
             total_loss += loss.item()
