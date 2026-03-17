@@ -62,7 +62,7 @@ with sqlite3.connect(manager.db_path) as conn:
         conn, params=params + [page_size, offset]
     )
 
-st.dataframe(df, use_container_width=True, height=600)
+st.dataframe(df, width="stretch", height=600)
 st.caption(f"Page {page}/{total_pages} — showing {len(df)} of {total:,} results")
 
 # Gene expression chart

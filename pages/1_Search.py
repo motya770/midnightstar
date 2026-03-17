@@ -102,7 +102,7 @@ if query:
                     for a in result["associations"]
                 ]
                 df = pd.DataFrame(assoc_data)
-                st.dataframe(df.sort_values("Score", ascending=False), use_container_width=True)
+                st.dataframe(df.sort_values("Score", ascending=False), width="stretch")
             else:
                 st.info("No associations found.")
 

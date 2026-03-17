@@ -86,7 +86,7 @@ if manager.is_downloaded("string_aliases") and not df.empty:
     df.insert(1, "gene1", df["protein1"].map(alias_map).fillna(""))
     df.insert(3, "gene2", df["protein2"].map(alias_map).fillna(""))
 
-st.dataframe(df, use_container_width=True, height=600)
+st.dataframe(df, width="stretch", height=600)
 st.caption(f"Page {page}/{total_pages} — showing {len(df)} of {total:,} results")
 
 csv = df.to_csv(index=False)

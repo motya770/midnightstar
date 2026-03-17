@@ -276,7 +276,7 @@ with col_config:
 with col_monitor:
     st.subheader("📈 Training Monitor")
 
-    if st.button("🚀 Start Training", type="primary", use_container_width=True):
+    if st.button("🚀 Start Training", type="primary", width="stretch"):
         # Build model kwargs
         if model_type == "GNN":
             model_class = "GNNLinkPredictor"
@@ -451,7 +451,7 @@ if runs:
     display_df["AUC-ROC"] = display_df["AUC-ROC"].apply(lambda x: f"{x:.4f}")
     display_df["Avg Precision"] = display_df["Avg Precision"].apply(lambda x: f"{x:.4f}")
 
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width="stretch", hide_index=True)
 
     # Delete run
     col_del1, col_del2 = st.columns([3, 1])

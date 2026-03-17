@@ -56,7 +56,7 @@ tab_all, tab_individual = st.tabs(["Download All", "Individual Sources"])
 with tab_all:
     st.markdown("Download all 5 datasets + aliases in sequence. Core datasets take ~5-10 min, AlphaFold takes longer (~20K API queries).")
 
-    if st.button("🚀 Download All Datasets", type="primary", use_container_width=True):
+    if st.button("🚀 Download All Datasets", type="primary", width="stretch"):
         progress_text = st.empty()
         progress_bar = st.progress(0)
         log = st.container()

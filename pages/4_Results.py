@@ -143,7 +143,7 @@ with bottom_left:
     st.subheader("Predictions Table")
     if predictions:
         df = pd.DataFrame(predictions)[["Gene A", "Gene B", "Predicted Score"]]
-        st.dataframe(df, use_container_width=True, height=300)
+        st.dataframe(df, width="stretch", height=300)
 
         csv = df.to_csv(index=False)
         st.download_button("📥 Export CSV", csv, "predictions.csv", "text/csv")
