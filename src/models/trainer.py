@@ -111,9 +111,12 @@ class Trainer:
         else:
             t0 = _time.time()
             print("[DEBUG] full: forward pass...", end=" ", flush=True)
-            pos_edge = train_data.edge_label_index
-            pos_src, pos_dst = pos_edge[0], pos_edge[1]
+            # Extract only positive edges from the split (edge_label_index contains both pos and neg)
+            pos_mask = train_data.edge_label == 1
+            pos_src = train_data.edge_label_index[0][pos_mask]
+            pos_dst = train_data.edge_label_index[1][pos_mask]
 
+            # Fresh negative samples each epoch for variety
             neg_edge = negative_sampling(
                 edge_index=train_data.edge_index,
                 num_nodes=train_data.num_nodes,
@@ -178,8 +181,10 @@ class Trainer:
         z = self.model.encode(dropped_data).detach().requires_grad_(True)
         print(f"{_time.time()-t0:.1f}s (z shape: {z.shape})", flush=True)
 
-        pos_edge = train_data.edge_label_index
-        pos_src, pos_dst = pos_edge[0], pos_edge[1]
+        # Extract only positive edges (edge_label_index contains both pos and neg from split)
+        pos_mask = train_data.edge_label == 1
+        pos_src = train_data.edge_label_index[0][pos_mask]
+        pos_dst = train_data.edge_label_index[1][pos_mask]
         neg_edge = negative_sampling(
             edge_index=train_data.edge_index,
             num_nodes=train_data.num_nodes,
