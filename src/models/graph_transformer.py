@@ -54,10 +54,17 @@ class RWSEEncoder(nn.Module):
 class GraphTransformerLinkPredictor(nn.Module):
     def __init__(self, in_channels: int, hidden_channels: int = 64, num_layers: int = 2,
                  num_heads: int = 4, rwse_dim: int = 16, rwse_walk_length: int = 16,
-                 rwse_probes: int = 256):
+                 rwse_probes: int = 256, gwas_vocab_size: int = 0,
+                 gwas_num_categories: int = 0, gwas_embed_dim: int = 32):
         super().__init__()
+        from .gnn import GWASEncoder
+        self.gwas_encoder = None
+        gwas_channels = 0
+        if gwas_vocab_size > 1:
+            self.gwas_encoder = GWASEncoder(gwas_vocab_size, gwas_num_categories, gwas_embed_dim)
+            gwas_channels = gwas_embed_dim
         self.rwse = RWSEEncoder(walk_length=rwse_walk_length, out_dim=rwse_dim, num_probes=rwse_probes)
-        self.input_proj = nn.Linear(in_channels + rwse_dim, hidden_channels)
+        self.input_proj = nn.Linear(in_channels + gwas_channels + rwse_dim, hidden_channels)
         self.layers = nn.ModuleList()
         for _ in range(num_layers):
             self.layers.append(TransformerConv(hidden_channels, hidden_channels // num_heads, heads=num_heads))
@@ -95,7 +102,12 @@ class GraphTransformerLinkPredictor(nn.Module):
         t0 = _time.time()
         print("[DEBUG] encode: RWSE proj + input_proj...", end=" ", flush=True)
         pe = self.rwse(rw_diag)
-        x = torch.cat([data.x, pe], dim=-1)
+        parts = [data.x]
+        if self.gwas_encoder is not None and hasattr(data, "gwas_token_ids"):
+            gwas_feat = self.gwas_encoder(data.gwas_token_ids, data.gwas_scores, data.gwas_cat_ids)
+            parts.append(gwas_feat)
+        parts.append(pe)
+        x = torch.cat(parts, dim=-1)
         x = self.input_proj(x)
         print(f"{_time.time()-t0:.1f}s", flush=True)
 

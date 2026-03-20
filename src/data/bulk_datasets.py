@@ -182,7 +182,24 @@ class BulkDatasetManager:
                     ))
 
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM gwas")
+            conn.execute("DROP TABLE IF EXISTS gwas")
+            conn.execute("""
+                CREATE TABLE gwas (
+                    snp TEXT,
+                    mapped_gene TEXT,
+                    disease_trait TEXT,
+                    pvalue REAL,
+                    pvalue_mlog REAL,
+                    risk_allele_freq TEXT,
+                    reported_genes TEXT,
+                    study TEXT,
+                    pubmedid TEXT,
+                    mapped_trait TEXT,
+                    mapped_trait_uri TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_gwas_gene ON gwas(mapped_gene)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_gwas_trait ON gwas(disease_trait)")
             conn.executemany(
                 "INSERT INTO gwas VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows
             )
@@ -213,7 +230,17 @@ class BulkDatasetManager:
                     rows.append((ensembl_id, gene_symbol, tissue, tpm))
 
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM gtex")
+            conn.execute("DROP TABLE IF EXISTS gtex")
+            conn.execute("""
+                CREATE TABLE gtex (
+                    ensembl_id TEXT,
+                    gene_symbol TEXT,
+                    tissue TEXT,
+                    median_tpm REAL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_gtex_gene ON gtex(gene_symbol)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_gtex_ensembl ON gtex(ensembl_id)")
             conn.executemany(
                 "INSERT INTO gtex VALUES (?,?,?,?)", rows
             )
@@ -245,7 +272,20 @@ class BulkDatasetManager:
                     ))
 
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM hpa")
+            conn.execute("DROP TABLE IF EXISTS hpa")
+            conn.execute("""
+                CREATE TABLE hpa (
+                    gene TEXT,
+                    ensembl TEXT,
+                    gene_description TEXT,
+                    subcellular_location TEXT,
+                    rna_tissue_specificity TEXT,
+                    tissue_expression_cluster TEXT,
+                    protein_class TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_hpa_gene ON hpa(gene)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_hpa_ensembl ON hpa(ensembl)")
             conn.executemany(
                 "INSERT INTO hpa VALUES (?,?,?,?,?,?,?)", rows
             )
@@ -281,7 +321,23 @@ class BulkDatasetManager:
             ))
 
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM string")
+            conn.execute("DROP TABLE IF EXISTS string")
+            conn.execute("""
+                CREATE TABLE string (
+                    protein1 TEXT,
+                    protein2 TEXT,
+                    neighborhood INTEGER,
+                    fusion INTEGER,
+                    cooccurence INTEGER,
+                    coexpression INTEGER,
+                    experimental INTEGER,
+                    database_score INTEGER,
+                    textmining INTEGER,
+                    combined_score INTEGER
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_string_p1 ON string(protein1)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_string_p2 ON string(protein2)")
             conn.executemany(
                 "INSERT INTO string VALUES (?,?,?,?,?,?,?,?,?,?)", rows
             )
@@ -884,8 +940,9 @@ class BulkDatasetManager:
         lines = text.strip().split("\n")
 
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DROP TABLE IF EXISTS string_aliases")
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS string_aliases (
+                CREATE TABLE string_aliases (
                     protein_id TEXT,
                     gene_symbol TEXT,
                     source TEXT
@@ -893,7 +950,6 @@ class BulkDatasetManager:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_protein ON string_aliases(protein_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_gene ON string_aliases(gene_symbol)")
-            conn.execute("DELETE FROM string_aliases")
 
             rows = []
             for line in lines[1:]:
