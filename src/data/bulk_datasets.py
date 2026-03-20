@@ -793,26 +793,11 @@ class BulkDatasetManager:
             if on_progress:
                 on_progress("Loading GWAS associations as gene features...")
             with sqlite3.connect(self.db_path) as conn:
-                # Check if new columns exist (requires GWAS re-download)
-                cols = {r[1] for r in conn.execute("PRAGMA table_info(gwas)").fetchall()}
-                has_ontology = "mapped_trait" in cols
-                if has_ontology:
-                    gwas_rows = conn.execute(
-                        "SELECT mapped_gene, disease_trait, pvalue, mapped_trait, mapped_trait_uri "
-                        "FROM gwas WHERE pvalue IS NOT NULL AND pvalue <= ? AND mapped_gene != ''",
-                        (max_disease_pvalue,)
-                    ).fetchall()
-                else:
-                    if on_progress:
-                        on_progress("GWAS missing ontology columns — re-download GWAS for trait classification")
-                    gwas_rows = [
-                        (mg, dt, pv, "", "")
-                        for mg, dt, pv in conn.execute(
-                            "SELECT mapped_gene, disease_trait, pvalue "
-                            "FROM gwas WHERE pvalue IS NOT NULL AND pvalue <= ? AND mapped_gene != ''",
-                            (max_disease_pvalue,)
-                        ).fetchall()
-                    ]
+                gwas_rows = conn.execute(
+                    "SELECT mapped_gene, disease_trait, pvalue, mapped_trait, mapped_trait_uri "
+                    "FROM gwas WHERE pvalue IS NOT NULL AND pvalue <= ? AND mapped_gene != ''",
+                    (max_disease_pvalue,)
+                ).fetchall()
 
             # Classify traits by ontology URI prefix
             def _classify_trait(uri):
