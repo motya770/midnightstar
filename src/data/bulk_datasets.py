@@ -41,7 +41,9 @@ class BulkDatasetManager:
                     risk_allele_freq TEXT,
                     reported_genes TEXT,
                     study TEXT,
-                    pubmedid TEXT
+                    pubmedid TEXT,
+                    mapped_trait TEXT,
+                    mapped_trait_uri TEXT
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_gwas_gene ON gwas(mapped_gene)")
@@ -175,12 +177,14 @@ class BulkDatasetManager:
                         row.get("REPORTED GENE(S)", ""),
                         row.get("STUDY", ""),
                         row.get("PUBMEDID", ""),
+                        row.get("MAPPED_TRAIT", ""),
+                        row.get("MAPPED_TRAIT_URI", ""),
                     ))
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM gwas")
             conn.executemany(
-                "INSERT INTO gwas VALUES (?,?,?,?,?,?,?,?,?)", rows
+                "INSERT INTO gwas VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows
             )
         self._set_status("gwas", "complete", len(rows))
         return len(rows)
@@ -669,19 +673,31 @@ class BulkDatasetManager:
         if on_progress:
             on_progress(f"Added {len(gene_set)} gene nodes")
 
+        # Build Ensembl ID -> HPA symbol mapping for cross-referencing
+        ensembl_to_hpa = {}
+        for row in hpa_rows:
+            gene = row["gene"]
+            ensembl = row["ensembl"]
+            if gene and ensembl:
+                ensembl_to_hpa[ensembl] = gene
+
         # Step 2: Add GTEx expression as node features
         if on_progress:
             on_progress("Loading GTEx expression data...")
         with sqlite3.connect(self.db_path) as conn:
             gtex_rows = conn.execute(
-                "SELECT gene_symbol, tissue, median_tpm FROM gtex WHERE median_tpm > 0"
+                "SELECT ensembl_id, gene_symbol, tissue, median_tpm FROM gtex WHERE median_tpm > 0"
             ).fetchall()
 
         expr_data = {}
-        for gene, tissue, tpm in gtex_rows:
-            if gene not in expr_data:
-                expr_data[gene] = {}
-            expr_data[gene][tissue] = tpm
+        for ensembl_id, gene, tissue, tpm in gtex_rows:
+            # Resolve to HPA symbol: try direct match first, then Ensembl ID lookup
+            resolved = gene if gene in gene_set else ensembl_to_hpa.get(ensembl_id)
+            if not resolved:
+                continue
+            if resolved not in expr_data:
+                expr_data[resolved] = {}
+            expr_data[resolved][tissue] = tpm
 
         for gene, tissues in expr_data.items():
             if gene in G.nodes:
@@ -772,44 +788,81 @@ class BulkDatasetManager:
         if on_progress:
             on_progress(f"Added {edge_count} STRING edges")
 
-        # Step 5: Add GWAS disease associations
+        # Step 5: Add GWAS associations as gene node features
         if include_diseases:
             if on_progress:
-                on_progress("Loading GWAS disease associations...")
+                on_progress("Loading GWAS associations as gene features...")
             with sqlite3.connect(self.db_path) as conn:
-                gwas_rows = conn.execute(
-                    "SELECT mapped_gene, disease_trait, pvalue FROM gwas "
-                    "WHERE pvalue IS NOT NULL AND pvalue <= ? AND mapped_gene != ''",
-                    (max_disease_pvalue,)
-                ).fetchall()
+                # Check if new columns exist (requires GWAS re-download)
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(gwas)").fetchall()}
+                has_ontology = "mapped_trait" in cols
+                if has_ontology:
+                    gwas_rows = conn.execute(
+                        "SELECT mapped_gene, disease_trait, pvalue, mapped_trait, mapped_trait_uri "
+                        "FROM gwas WHERE pvalue IS NOT NULL AND pvalue <= ? AND mapped_gene != ''",
+                        (max_disease_pvalue,)
+                    ).fetchall()
+                else:
+                    if on_progress:
+                        on_progress("GWAS missing ontology columns — re-download GWAS for trait classification")
+                    gwas_rows = [
+                        (mg, dt, pv, "", "")
+                        for mg, dt, pv in conn.execute(
+                            "SELECT mapped_gene, disease_trait, pvalue "
+                            "FROM gwas WHERE pvalue IS NOT NULL AND pvalue <= ? AND mapped_gene != ''",
+                            (max_disease_pvalue,)
+                        ).fetchall()
+                    ]
 
-            disease_edges = 0
-            seen_pairs = set()
-            for mapped_gene, disease, pvalue in gwas_rows:
-                # mapped_gene can contain multiple genes separated by " - "
-                genes = [g.strip() for g in mapped_gene.split(" - ") if g.strip()]
+            # Classify traits by ontology URI prefix
+            def _classify_trait(uri):
+                if not uri:
+                    return "other"
+                for u in uri.split(", "):
+                    tag = u.rsplit("/", 1)[-1] if "/" in u else ""
+                    if tag.startswith("MONDO") or tag.startswith("Orphanet"):
+                        return "disease"
+                    if tag.startswith("HP"):
+                        return "phenotype"
+                    if tag.startswith("OBA"):
+                        return "measurement"
+                    if tag.startswith("GO"):
+                        return "biological_process"
+                return "trait"  # EFO and others
+
+            # Collect per-gene GWAS associations grouped by category
+            gwas_by_gene = {}
+            for mapped_gene, disease_trait, pvalue, mapped_trait, uri in gwas_rows:
+                category = _classify_trait(uri)
+                normalized = mapped_gene.replace(" - ", ",").replace(";", ",")
+                genes = {g.strip() for g in normalized.split(",") if g.strip()}
+                trait_name = mapped_trait or disease_trait
+                score = min(1.0, -math.log10(max(pvalue, 1e-300)) / 50)
+
                 for gene in genes:
                     if gene not in G.nodes:
                         continue
-                    disease_id = disease.replace(" ", "_")[:60]
-                    pair = (gene, disease_id)
-                    if pair in seen_pairs:
-                        continue
-                    seen_pairs.add(pair)
+                    if gene not in gwas_by_gene:
+                        gwas_by_gene[gene] = {}
+                    key = (category, trait_name)
+                    # Keep strongest association (lowest p-value = highest score)
+                    if key not in gwas_by_gene[gene] or score > gwas_by_gene[gene][key]:
+                        gwas_by_gene[gene][key] = score
 
-                    if disease_id not in G.nodes:
-                        G.add_node(disease_id, node_type="disease", name=disease,
-                                   description="", id=disease_id)
+            # Apply to graph nodes
+            gwas_gene_count = 0
+            for gene, associations in gwas_by_gene.items():
+                gwas_features = {}
+                for (category, trait_name), score in associations.items():
+                    if category not in gwas_features:
+                        gwas_features[category] = []
+                    gwas_features[category].append({"trait": trait_name, "score": round(score, 4)})
+                G.nodes[gene]["gwas"] = gwas_features
+                gwas_gene_count += 1
 
-                    score = min(1.0, -math.log10(max(pvalue, 1e-300)) / 50)
-                    G.add_edge(gene, disease_id, score=round(score, 4),
-                               data_source="GWAS", sources=["GWAS"],
-                               type="gene-disease",
-                               evidence=f"p-value: {pvalue:.2e}")
-                    disease_edges += 1
-
+            trait_count = sum(len(v) for assoc in gwas_by_gene.values() for v in assoc)
             if on_progress:
-                on_progress(f"Added {disease_edges} disease associations")
+                on_progress(f"Added GWAS features to {gwas_gene_count} genes ({trait_count} trait associations)")
 
         if on_progress:
             on_progress(f"Full graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
@@ -865,8 +918,8 @@ class BulkDatasetManager:
                 protein_id = parts[0]
                 alias = parts[1]
                 source = parts[2]
-                # Keep BioMart_HUGO and Ensembl_HGNC entries as gene symbols
-                if "HGNC" in source or "BioMart_HUGO" in source or source == "Ensembl_gene":
+                # Keep only canonical gene symbol mappings
+                if source == "Ensembl_HGNC":
                     rows.append((protein_id, alias, source))
 
             conn.executemany("INSERT INTO string_aliases VALUES (?,?,?)", rows)

@@ -202,7 +202,7 @@ around it, weighted by attention.
 
 ---
 
-## Step 4: Decode — Predicting Edges
+##  Step 4: Decode — Predicting Edges
 
 Given embeddings for all nodes, we score a candidate edge (u, v):
 

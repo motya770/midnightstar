@@ -64,9 +64,9 @@ if graph is None:
     if graph_mode == "Full dataset (all genes)":
         st.markdown("""
         Merges **all 5 sources** into one graph:
-        - **Nodes:** All genes from HPA (~20K) + GWAS diseases
-        - **Edges:** STRING protein interactions + GWAS gene-disease links
-        - **Features:** GTEx expression (54 tissues) + AlphaFold structure (pLDDT, disorder, length) + HPA annotations
+        - **Nodes:** All genes from HPA (~20K)
+        - **Edges:** STRING protein-protein interactions
+        - **Features:** GTEx expression (54 tissues) + AlphaFold structure (pLDDT, disorder, length) + HPA annotations + GWAS associations (diseases, traits, measurements)
         """)
         full_min_score = st.select_slider(
             "Min STRING score (higher = fewer but stronger edges)",
@@ -74,16 +74,16 @@ if graph is None:
             value=700,
             help="700 = high confidence (~470K edges), 900 = highest (~200K edges). Lower values use more memory.",
         )
-        include_diseases = st.checkbox("Include GWAS disease nodes", value=True)
+        include_gwas = st.checkbox("Include GWAS associations (as gene features)", value=True)
         max_pvalue = st.select_slider(
             "Max GWAS p-value",
             options=[5e-4, 5e-6, 5e-8, 5e-10, 5e-20, 5e-50],
             value=5e-8,
-        ) if include_diseases else 5e-8
+        ) if include_gwas else 5e-8
 
         # Auto-generate name if not provided
         if not graph_name:
-            graph_name = f"full_s{full_min_score}{'_diseases' if include_diseases else ''}"
+            graph_name = f"full_s{full_min_score}{'_gwas' if include_gwas else ''}"
 
         if st.button("🔨 Build Full Graph", type="primary"):
             progress_text = st.empty()
@@ -96,7 +96,7 @@ if graph is None:
                         pass
                 graph = manager.build_full_graph(
                     min_string_score=full_min_score,
-                    include_diseases=include_diseases,
+                    include_diseases=include_gwas,
                     max_disease_pvalue=max_pvalue,
                     on_progress=lambda msg: progress_text.text(msg),
                 )
