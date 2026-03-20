@@ -471,6 +471,20 @@ with col_monitor:
             model=model,
             model_name=model_name,
         )
+
+        # Save full checkpoint for Results page reload
+        checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".datasets", "trained_models")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        torch.save({
+            "model_state": model.state_dict(),
+            "model_class": model_class,
+            "model_kwargs": model_kwargs,
+            "pyg_data": pyg_data,
+            "node_list": node_list,
+            "node_to_idx": node_to_idx,
+            "model_type": model_type,
+            "metrics": metrics,
+        }, os.path.join(checkpoint_dir, f"{model_name}_checkpoint.pt"))
         st.caption(f"Run saved (#{run_id})")
 
         # Store results in session

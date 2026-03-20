@@ -2,22 +2,78 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import torch
+import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from pyvis.network import Network
 import tempfile
 import os
-from src.utils.text_explainer import TextExplainer
+import glob as glob_mod
 from src.utils import session
+from src.models.gnn import GNNLinkPredictor
+from src.models.graph_transformer import GraphTransformerLinkPredictor
+from src.models.vae import GraphVAE
 
-st.title("📊 Discovery Dashboard")
+st.title("Discovery Dashboard")
 
 results = session.get_training_results()
 graph = session.get_graph()
 
+
+def _load_from_checkpoint():
+    """Load model from most recent checkpoint file."""
+    checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".datasets", "trained_models")
+    checkpoints = sorted(glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt")))
+    if not checkpoints:
+        return None
+    # Let user pick if multiple checkpoints
+    if len(checkpoints) > 1:
+        names = [os.path.basename(c).replace("_checkpoint.pt", "") for c in checkpoints]
+        selected = st.selectbox("Select trained model", names, index=len(names) - 1)
+        path = checkpoints[names.index(selected)]
+    else:
+        path = checkpoints[-1]
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    model_class = checkpoint["model_class"]
+    model_kwargs = checkpoint["model_kwargs"]
+
+    if model_class == "GNNLinkPredictor":
+        mdl = GNNLinkPredictor(**model_kwargs)
+    elif model_class == "GraphTransformerLinkPredictor":
+        mdl = GraphTransformerLinkPredictor(**model_kwargs)
+    else:
+        mdl = GraphVAE(**model_kwargs)
+
+    mdl.load_state_dict(checkpoint["model_state"])
+    return {
+        "model": mdl,
+        "pyg_data": checkpoint["pyg_data"],
+        "node_list": checkpoint["node_list"],
+        "node_to_idx": checkpoint["node_to_idx"],
+        "model_type": checkpoint["model_type"],
+        "metrics": checkpoint["metrics"],
+    }
+
+
+if results is None:
+    results = _load_from_checkpoint()
+    if results is not None:
+        session.set_training_results(results)
+
 if results is None:
     st.warning("No training results available. Go to **Model Training** first.")
     st.stop()
+
+# Load graph from disk if not in session
+if graph is None:
+    from src.data.bulk_datasets import BulkDatasetManager
+    _mgr = BulkDatasetManager()
+    saved = _mgr.list_saved_graphs()
+    if saved:
+        graph = _mgr.load_graph(saved[0]["name"])
+        if graph:
+            session.set_graph(graph)
 
 model = results["model"]
 pyg_data = results["pyg_data"]
@@ -25,176 +81,314 @@ node_list = results["node_list"]
 node_to_idx = results["node_to_idx"]
 metrics = results["metrics"]
 model_type = results["model_type"]
-explainer = TextExplainer()
 
-# Generate predictions for all non-existing edges
+# --- Compute embeddings once ---
 model.eval()
 with torch.no_grad():
-    existing_edges = set()
-    for i in range(pyg_data.edge_index.size(1)):
-        src_idx = pyg_data.edge_index[0, i].item()
-        dst_idx = pyg_data.edge_index[1, i].item()
-        existing_edges.add((min(src_idx, dst_idx), max(src_idx, dst_idx)))
+    z = model.encode(pyg_data)  # [num_nodes, hidden_dim]
+    z_norm = F.normalize(z, dim=-1)  # for cosine similarity
 
-    predictions = []
-    num_nodes = pyg_data.num_nodes
-    for i in range(num_nodes):
-        for j in range(i + 1, num_nodes):
-            if (i, j) not in existing_edges:
-                src_t = torch.tensor([i])
-                dst_t = torch.tensor([j])
-                if hasattr(model, "predict_links"):
-                    score = model.predict_links(pyg_data.x, pyg_data.edge_index, src_t, dst_t).item()
-                else:
-                    score = model(pyg_data, src_t, dst_t).item()
-                if score > 0.3:
-                    predictions.append({
-                        "Gene A": node_list[i],
-                        "Gene B": node_list[j],
-                        "Predicted Score": round(score, 4),
-                        "src_idx": i,
-                        "dst_idx": j,
-                    })
 
-    predictions.sort(key=lambda x: x["Predicted Score"], reverse=True)
+# --- Helper functions ---
+def get_disease_genes(disease_name):
+    """Find genes associated with a disease in the graph's GWAS data."""
+    genes = []
+    for node in node_list:
+        gwas = graph.nodes[node].get("gwas", {}) if graph else {}
+        for cat, entries in gwas.items():
+            for entry in entries:
+                if disease_name.lower() in entry["trait"].lower():
+                    genes.append((node, entry["trait"], entry["score"], cat))
+    return genes
 
-# 2x2 Grid
-top_left, top_right = st.columns(2)
-bottom_left, bottom_right = st.columns(2)
 
-# Top-left: Discovery Network
-with top_left:
-    st.subheader("Discovery Network")
-    show_only_new = st.checkbox("Show only discoveries", value=False)
+def get_all_diseases():
+    """Collect all unique GWAS traits from the graph."""
+    diseases = {}
+    if not graph:
+        return diseases
+    for node in node_list:
+        gwas = graph.nodes[node].get("gwas", {})
+        for cat, entries in gwas.items():
+            for entry in entries:
+                trait = entry["trait"]
+                if trait not in diseases:
+                    diseases[trait] = {"category": cat, "gene_count": 0}
+                diseases[trait]["gene_count"] += 1
+    return diseases
 
-    net = Network(height="400px", width="100%", bgcolor="#0e1117", font_color="white")
-    net.barnes_hut(gravity=-2000)
 
-    shown_nodes = set()
-    # Add predicted edges
-    for pred in predictions[:20]:
-        for gene in [pred["Gene A"], pred["Gene B"]]:
-            if gene not in shown_nodes:
-                net.add_node(gene, label=gene, color="#ff8844", size=15, title=f"Discovery: {gene}")
-                shown_nodes.add(gene)
-        net.add_edge(pred["Gene A"], pred["Gene B"],
-                    width=pred["Predicted Score"] * 4,
-                    color="#ff8844", dashes=True,
-                    title=f"Predicted: {pred['Predicted Score']:.2f}")
+def predict_disease_genes(disease_name, top_k=50):
+    """Predict new genes for a disease using embedding similarity."""
+    known = get_disease_genes(disease_name)
+    known_genes = list({g[0] for g in known})
+    if not known_genes:
+        return [], known_genes
 
-    if not show_only_new and graph:
-        for u, v, d in graph.edges(data=True):
-            for node in [u, v]:
-                if node not in shown_nodes:
-                    node_data = graph.nodes.get(node, {})
-                    color = "#2a5a8c" if node_data.get("node_type") == "gene" else "#8c2a5c"
-                    net.add_node(node, label=node, color=color, size=12)
-                    shown_nodes.add(node)
-            net.add_edge(u, v, width=d.get("score", 0.5) * 3, color="#2a5a8c",
-                        title=f"Known: {d.get('score', 'N/A')}")
+    # Compute disease signature (mean embedding of known genes)
+    known_indices = [node_to_idx[g] for g in known_genes if g in node_to_idx]
+    if not known_indices:
+        return [], known_genes
 
-    with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
-        net.save_graph(f.name)
-        html = open(f.name).read()
-        components.html(html, height=420, scrolling=True)
-    os.unlink(f.name)
+    disease_sig = z_norm[known_indices].mean(dim=0, keepdim=True)
+    disease_sig = F.normalize(disease_sig, dim=-1)
 
-# Top-right: Summary
-with top_right:
-    st.subheader("Summary")
-    st.markdown(f"**Model:** {model_type} | **AUC-ROC:** {metrics['auc_roc']:.4f} | "
-                f"**Avg Precision:** {metrics['avg_precision']:.4f}")
+    # Cosine similarity to all genes
+    similarities = (z_norm @ disease_sig.T).squeeze()
 
-    num_discoveries = len(predictions)
-    if num_discoveries > 0:
-        top = predictions[0]
-        st.markdown(
-            f"The {model_type} model found **{num_discoveries} potential new connections**. "
-            f"The strongest predicted link is between **{top['Gene A']}** and "
-            f"**{top['Gene B']}** (confidence: {top['Predicted Score']:.2f})."
-        )
+    # Rank and exclude known genes
+    known_set = set(known_genes)
+    candidates = []
+    for idx in similarities.argsort(descending=True):
+        idx = idx.item()
+        gene = node_list[idx]
+        if gene not in known_set:
+            candidates.append({
+                "gene": gene,
+                "similarity": round(similarities[idx].item(), 4),
+                "description": graph.nodes[gene].get("name", "") if graph else "",
+            })
+            if len(candidates) >= top_k:
+                break
 
-        st.markdown("**Top Discoveries:**")
-        for i, pred in enumerate(predictions[:10], 1):
-            score = pred["Predicted Score"]
-            color = "🟢" if score >= 0.7 else "🟡" if score >= 0.5 else "🟠"
-            st.markdown(f"{i}. {color} **{pred['Gene A']}** ↔ **{pred['Gene B']}** — {score:.2f}")
+    return candidates, known_genes
 
-            with st.expander(f"Why {pred['Gene A']} ↔ {pred['Gene B']}?"):
-                # Find shared info from graph
-                shared_partners, shared_tissues = [], []
-                if graph:
-                    neighbors_a = set(graph.neighbors(pred["Gene A"])) if pred["Gene A"] in graph else set()
-                    neighbors_b = set(graph.neighbors(pred["Gene B"])) if pred["Gene B"] in graph else set()
-                    shared_partners = list(neighbors_a & neighbors_b)
-                    expr_a = graph.nodes.get(pred["Gene A"], {}).get("expression", {})
-                    expr_b = graph.nodes.get(pred["Gene B"], {}).get("expression", {})
-                    shared_tissues = [t for t in expr_a if t in expr_b]
 
-                explanation = explainer.explain_prediction(
-                    pred["Gene A"], pred["Gene B"], score, shared_partners, shared_tissues,
-                )
-                st.markdown(explanation)
-    else:
-        st.info("No strong predictions found. Try training with more data or different parameters.")
+def find_similar_genes(gene_name, top_k=20):
+    """Find genes with most similar embeddings."""
+    if gene_name not in node_to_idx:
+        return []
+    idx = node_to_idx[gene_name]
+    sims = (z_norm @ z_norm[idx]).squeeze()
+    results = []
+    for i in sims.argsort(descending=True):
+        i = i.item()
+        if node_list[i] != gene_name:
+            results.append({
+                "gene": node_list[i],
+                "similarity": round(sims[i].item(), 4),
+                "description": graph.nodes[node_list[i]].get("name", "") if graph else "",
+            })
+            if len(results) >= top_k:
+                break
+    return results
 
-# Bottom-left: Data Table
-with bottom_left:
-    st.subheader("Predictions Table")
-    if predictions:
-        df = pd.DataFrame(predictions)[["Gene A", "Gene B", "Predicted Score"]]
-        st.dataframe(df, width="stretch", height=300)
 
-        csv = df.to_csv(index=False)
-        st.download_button("📥 Export CSV", csv, "predictions.csv", "text/csv")
-    else:
-        st.info("No predictions to display.")
+# --- UI Layout ---
+st.markdown(f"**Model:** {model_type} | **AUC-ROC:** {metrics['auc_roc']:.4f} | "
+            f"**Avg Precision:** {metrics['avg_precision']:.4f} | "
+            f"**Embedding dim:** {z.size(1)} | **Genes:** {z.size(0)}")
 
-# Bottom-right: Evidence
-with bottom_right:
-    st.subheader("Evidence Panel")
-    if predictions:
-        selected_pred = st.selectbox(
-            "Select prediction",
-            [f"{p['Gene A']} ↔ {p['Gene B']} ({p['Predicted Score']:.2f})" for p in predictions[:20]],
-        )
-        if selected_pred:
-            idx = next(
-                i for i, p in enumerate(predictions[:20])
-                if f"{p['Gene A']} ↔ {p['Gene B']}" in selected_pred
+tab_disease, tab_gene, tab_link = st.tabs([
+    "Disease Gene Discovery",
+    "Gene Similarity",
+    "Link Prediction",
+])
+
+# === Tab 1: Disease Gene Discovery ===
+with tab_disease:
+    st.subheader("Predict new genes for a disease")
+    st.markdown("Select a disease/trait to find genes that the model predicts are involved "
+                "but aren't yet in GWAS data.")
+
+    all_diseases = get_all_diseases()
+    if all_diseases:
+        # Filter options
+        col_cat, col_min = st.columns(2)
+        with col_cat:
+            categories = sorted({v["category"] for v in all_diseases.values()})
+            sel_cat = st.multiselect("Filter by category", categories, default=["disease"])
+        with col_min:
+            min_genes = st.slider("Min known genes", 2, 50, 5)
+
+        # Build filtered disease list
+        filtered = {k: v for k, v in all_diseases.items()
+                    if v["category"] in sel_cat and v["gene_count"] >= min_genes}
+        disease_options = sorted(filtered.keys(), key=lambda x: filtered[x]["gene_count"], reverse=True)
+
+        if disease_options:
+            selected_disease = st.selectbox(
+                f"Disease/trait ({len(disease_options)} available)",
+                disease_options,
+                format_func=lambda x: f"{x} ({filtered[x]['gene_count']} known genes, {filtered[x]['category']})",
             )
-            pred = predictions[idx]
+            top_k = st.slider("Number of predictions", 10, 200, 50)
 
-            if graph:
-                for gene in [pred["Gene A"], pred["Gene B"]]:
-                    expr = graph.nodes.get(gene, {}).get("expression", {})
-                    if expr:
-                        st.markdown(f"**{gene} expression:**")
-                        top_tissues = sorted(expr.items(), key=lambda x: x[1], reverse=True)[:5]
-                        tissue_df = pd.DataFrame(top_tissues, columns=["Tissue", "Level"])
-                        st.bar_chart(tissue_df.set_index("Tissue"))
+            if st.button("Predict", type="primary"):
+                candidates, known_genes = predict_disease_genes(selected_disease, top_k)
 
-                st.markdown("**Supporting evidence:**")
-                for gene in [pred["Gene A"], pred["Gene B"]]:
-                    neighbors = list(graph.neighbors(gene)) if gene in graph else []
-                    if neighbors:
-                        st.markdown(f"- {gene} connects to: {', '.join(neighbors[:5])}")
+                if candidates:
+                    col_known, col_pred = st.columns(2)
+
+                    with col_known:
+                        st.markdown(f"**Known genes ({len(known_genes)}):**")
+                        known_df = pd.DataFrame([
+                            {"Gene": g, "Description": graph.nodes[g].get("name", "") if graph else ""}
+                            for g in sorted(known_genes)
+                        ])
+                        st.dataframe(known_df, height=300)
+
+                    with col_pred:
+                        st.markdown(f"**Predicted candidates ({len(candidates)}):**")
+                        pred_df = pd.DataFrame(candidates)
+                        pred_df.columns = ["Gene", "Similarity", "Description"]
+                        st.dataframe(pred_df, height=300)
+
+                    # Visualization
+                    st.subheader("Discovery network")
+                    net = Network(height="500px", width="100%", bgcolor="#0e1117", font_color="white")
+                    net.barnes_hut(gravity=-3000)
+
+                    # Add known genes
+                    for g in known_genes[:30]:
+                        net.add_node(g, label=g, color="#2a5a8c", size=15,
+                                     title=f"Known: {g}")
+
+                    # Add predicted genes
+                    for c in candidates[:20]:
+                        net.add_node(c["gene"], label=c["gene"], color="#ff8844", size=12,
+                                     title=f"Predicted: {c['gene']} (sim={c['similarity']:.3f})")
+
+                    # Add edges between genes that are connected in STRING
+                    shown = set(known_genes[:30]) | {c["gene"] for c in candidates[:20]}
+                    if graph:
+                        for u in shown:
+                            for v in shown:
+                                if u < v and graph.has_edge(u, v):
+                                    d = graph.edges[u, v]
+                                    color = "#2a5a8c" if u in known_genes and v in known_genes else "#ff8844"
+                                    net.add_edge(u, v, width=2, color=color,
+                                                 title=f"STRING: {d.get('score', 'N/A')}")
+
+                    with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
+                        net.save_graph(f.name)
+                        html = open(f.name).read()
+                        components.html(html, height=520, scrolling=True)
+                    os.unlink(f.name)
+
+                    # Export
+                    csv = pred_df.to_csv(index=False)
+                    st.download_button("Export predictions CSV", csv,
+                                       f"predictions_{selected_disease.replace(' ', '_')}.csv", "text/csv")
+                else:
+                    st.warning("No candidates found. The disease may have too few known genes.")
+        else:
+            st.info("No diseases match the current filters. Try lowering min known genes or adding categories.")
     else:
-        st.info("Select a prediction to see evidence.")
+        st.warning("No GWAS data found in the graph. Rebuild with GWAS enabled.")
 
-# Save/Export
+# === Tab 2: Gene Similarity ===
+with tab_gene:
+    st.subheader("Find genes with similar profiles")
+    st.markdown("Enter a gene to find others with the most similar learned embeddings. "
+                "These share expression patterns, network neighborhoods, and disease associations.")
+
+    gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, APOE").strip().upper()
+
+    if gene_input:
+        if gene_input in node_to_idx:
+            similar = find_similar_genes(gene_input, top_k=30)
+
+            # Show query gene info
+            if graph and gene_input in graph.nodes:
+                gdata = graph.nodes[gene_input]
+                st.markdown(f"**{gene_input}** — {gdata.get('name', 'N/A')}")
+                gwas = gdata.get("gwas", {})
+                if gwas:
+                    for cat, entries in gwas.items():
+                        traits = [e["trait"] for e in sorted(entries, key=lambda x: -x["score"])[:5]]
+                        st.markdown(f"- *{cat}*: {', '.join(traits)}")
+
+            st.divider()
+            st.markdown(f"**Top similar genes to {gene_input}:**")
+            sim_df = pd.DataFrame(similar)
+            sim_df.columns = ["Gene", "Similarity", "Description"]
+            st.dataframe(sim_df, height=400)
+
+            # Show shared diseases between query and top similar genes
+            if graph:
+                query_gwas = graph.nodes.get(gene_input, {}).get("gwas", {})
+                query_traits = set()
+                for entries in query_gwas.values():
+                    for e in entries:
+                        query_traits.add(e["trait"])
+
+                if query_traits:
+                    st.subheader("Shared disease/trait associations")
+                    for s in similar[:10]:
+                        other_gwas = graph.nodes.get(s["gene"], {}).get("gwas", {})
+                        other_traits = set()
+                        for entries in other_gwas.values():
+                            for e in entries:
+                                other_traits.add(e["trait"])
+                        shared = query_traits & other_traits
+                        if shared:
+                            st.markdown(f"**{s['gene']}** (sim={s['similarity']:.3f}): "
+                                        f"{', '.join(list(shared)[:5])}")
+        else:
+            st.warning(f"Gene '{gene_input}' not found in the graph.")
+
+# === Tab 3: Link Prediction ===
+with tab_link:
+    st.subheader("Predict interactions between genes")
+    st.markdown("Check if two genes are predicted to interact.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        gene_a = st.text_input("Gene A", placeholder="e.g., TP53").strip().upper()
+    with col_b:
+        gene_b = st.text_input("Gene B", placeholder="e.g., BRCA1").strip().upper()
+
+    if gene_a and gene_b:
+        if gene_a not in node_to_idx:
+            st.warning(f"Gene '{gene_a}' not found.")
+        elif gene_b not in node_to_idx:
+            st.warning(f"Gene '{gene_b}' not found.")
+        elif gene_a == gene_b:
+            st.warning("Enter two different genes.")
+        else:
+            idx_a = node_to_idx[gene_a]
+            idx_b = node_to_idx[gene_b]
+
+            # Embedding similarity
+            sim = F.cosine_similarity(z[idx_a].unsqueeze(0), z[idx_b].unsqueeze(0)).item()
+
+            # Link prediction score
+            with torch.no_grad():
+                src_t = torch.tensor([idx_a])
+                dst_t = torch.tensor([idx_b])
+                link_score = model.decode(z, src_t, dst_t).item()
+
+            # Known edge?
+            has_edge = graph.has_edge(gene_a, gene_b) if graph else False
+
+            st.markdown(f"**{gene_a} -- {gene_b}**")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Link score", f"{link_score:.4f}")
+            col2.metric("Embedding similarity", f"{sim:.4f}")
+            col3.metric("Known interaction", "Yes" if has_edge else "No")
+
+            if has_edge and graph:
+                edge_data = graph.edges[gene_a, gene_b]
+                st.markdown(f"**Known edge:** STRING score={edge_data.get('score', 'N/A')}, "
+                            f"evidence={edge_data.get('evidence', 'N/A')}")
+
+            # Show top shared neighbors
+            if graph:
+                neighbors_a = set(graph.neighbors(gene_a)) if gene_a in graph else set()
+                neighbors_b = set(graph.neighbors(gene_b)) if gene_b in graph else set()
+                shared = neighbors_a & neighbors_b
+                if shared:
+                    st.markdown(f"**Shared interaction partners ({len(shared)}):** "
+                                f"{', '.join(list(shared)[:15])}")
+
+# --- Save/Export ---
 st.divider()
 col_save, col_export = st.columns(2)
 with col_save:
-    if st.button("💾 Save Model"):
+    if st.button("Save Model"):
         save_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".models")
         os.makedirs(save_dir, exist_ok=True)
         path = os.path.join(save_dir, f"{model_type.lower().replace(' ', '_')}_model.pt")
         torch.save(model.state_dict(), path)
         st.success(f"Model saved to `{path}`")
-
-with col_export:
-    if predictions:
-        full_df = pd.DataFrame(predictions)[["Gene A", "Gene B", "Predicted Score"]]
-        html_report = full_df.to_html(index=False)
-        st.download_button("📄 Export HTML Report", html_report, "report.html", "text/html")
