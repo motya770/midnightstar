@@ -86,11 +86,17 @@ class Trainer:
             label_src = torch.cat([pos_src, neg_src])
             label_dst = torch.cat([pos_dst, neg_dst])
             labels = torch.cat([torch.ones(len(edge_list)), torch.zeros(neg_src.size(0))])
-            return Data(
+            split_data = Data(
                 x=data.x, edge_index=ei, num_nodes=data.num_nodes,
                 edge_label_index=torch.stack([label_src, label_dst]),
                 edge_label=labels,
             )
+            # Carry GWAS token tensors through splits
+            for attr in ("gwas_token_ids", "gwas_scores", "gwas_cat_ids",
+                         "gwas_vocab_size", "gwas_num_categories"):
+                if hasattr(data, attr):
+                    setattr(split_data, attr, getattr(data, attr))
+            return split_data
 
         # Split train edges into message-passing and supervision subsets.
         # Supervision edges must NOT appear in the MP graph — otherwise the model
@@ -177,6 +183,10 @@ class Trainer:
             mask = torch.rand(train_data.edge_index.size(1), device=self.device) > dropout
             dropped_ei = train_data.edge_index[:, mask]
             dropped_data = Data(x=train_data.x, edge_index=dropped_ei, num_nodes=train_data.num_nodes)
+            for attr in ("gwas_token_ids", "gwas_scores", "gwas_cat_ids",
+                         "gwas_vocab_size", "gwas_num_categories"):
+                if hasattr(train_data, attr):
+                    setattr(dropped_data, attr, getattr(train_data, attr))
             kept = mask.sum().item()
             total_ei = train_data.edge_index.size(1)
             print(f"[DEBUG] mini: encoding with edge dropout={dropout} ({kept}/{total_ei} edges)...", end=" ", flush=True)
