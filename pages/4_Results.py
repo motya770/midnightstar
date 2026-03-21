@@ -16,64 +16,104 @@ from src.models.vae import GraphVAE
 
 st.title("Discovery Dashboard")
 
+from src.data.bulk_datasets import BulkDatasetManager
+_mgr = BulkDatasetManager()
+
 results = session.get_training_results()
 graph = session.get_graph()
 
-
-def _load_from_checkpoint():
-    """Load model from most recent checkpoint file."""
-    checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".datasets", "trained_models")
-    checkpoints = sorted(glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt")))
-    if not checkpoints:
-        return None
-    # Let user pick if multiple checkpoints
-    if len(checkpoints) > 1:
-        names = [os.path.basename(c).replace("_checkpoint.pt", "") for c in checkpoints]
-        selected = st.selectbox("Select trained model", names, index=len(names) - 1)
-        path = checkpoints[names.index(selected)]
-    else:
-        path = checkpoints[-1]
-
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    model_class = checkpoint["model_class"]
-    model_kwargs = checkpoint["model_kwargs"]
-
-    if model_class == "GNNLinkPredictor":
-        mdl = GNNLinkPredictor(**model_kwargs)
-    elif model_class == "GraphTransformerLinkPredictor":
-        mdl = GraphTransformerLinkPredictor(**model_kwargs)
-    else:
-        mdl = GraphVAE(**model_kwargs)
-
-    mdl.load_state_dict(checkpoint["model_state"])
-    return {
-        "model": mdl,
-        "pyg_data": checkpoint["pyg_data"],
-        "node_list": checkpoint["node_list"],
-        "node_to_idx": checkpoint["node_to_idx"],
-        "model_type": checkpoint["model_type"],
-        "metrics": checkpoint["metrics"],
-    }
-
-
-if results is None:
-    results = _load_from_checkpoint()
-    if results is not None:
-        session.set_training_results(results)
-
-if results is None:
-    st.warning("No training results available. Go to **Model Training** first.")
-    st.stop()
-
 # Load graph from disk if not in session
 if graph is None:
-    from src.data.bulk_datasets import BulkDatasetManager
-    _mgr = BulkDatasetManager()
-    saved = _mgr.list_saved_graphs()
-    if saved:
-        graph = _mgr.load_graph(saved[0]["name"])
+    saved_graphs = _mgr.list_saved_graphs()
+    if saved_graphs:
+        graph = _mgr.load_graph(saved_graphs[0]["name"])
         if graph:
             session.set_graph(graph)
+
+# If no session results, let user pick from saved checkpoints or training runs
+if results is None:
+    from src.utils.graph_features import nx_to_pyg_data
+
+    # Collect all loadable models
+    checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".datasets", "trained_models")
+    checkpoints = sorted(glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt")))
+    training_runs = _mgr.list_training_runs()
+
+    if not checkpoints and not training_runs:
+        st.warning("No trained models found. Go to **Model Training** first.")
+        st.stop()
+
+    st.subheader("Load a trained model")
+
+    # Build options list
+    options = []
+    option_meta = []
+    for cp in reversed(checkpoints):
+        name = os.path.basename(cp).replace("_checkpoint.pt", "")
+        options.append(f"[checkpoint] {name}")
+        option_meta.append(("checkpoint", cp))
+    for run in training_runs:
+        if run.get("model_path") and os.path.exists(run["model_path"]):
+            label = (f"[run #{run['id']}] {run['model_type']} — "
+                     f"AUC={run['auc_roc']:.4f}, {run['nodes']} nodes, "
+                     f"{run['parameters']}")
+            options.append(label)
+            option_meta.append(("run", run))
+
+    if not options:
+        st.warning("No loadable models found. Train a model first.")
+        st.stop()
+
+    selected_idx = st.selectbox("Select model", range(len(options)),
+                                format_func=lambda i: options[i])
+
+    if st.button("Load model", type="primary"):
+        kind, meta = option_meta[selected_idx]
+
+        if kind == "checkpoint":
+            checkpoint = torch.load(meta, map_location="cpu", weights_only=False)
+            model_class = checkpoint["model_class"]
+            model_kwargs = checkpoint["model_kwargs"]
+
+            # Load graph for this checkpoint
+            graph_name = checkpoint.get("graph_name", "")
+            if graph is None and graph_name:
+                graph = _mgr.load_graph(graph_name)
+                if graph:
+                    session.set_graph(graph)
+
+            if graph is None:
+                st.error("No graph available. Build/load a graph from Model Training first.")
+                st.stop()
+
+            # Reconstruct pyg_data from graph
+            with st.spinner("Reconstructing features from graph..."):
+                pyg_data, node_list, node_to_idx = nx_to_pyg_data(graph)
+
+            if model_class == "GNNLinkPredictor":
+                mdl = GNNLinkPredictor(**model_kwargs)
+            elif model_class == "GraphTransformerLinkPredictor":
+                mdl = GraphTransformerLinkPredictor(**model_kwargs)
+            else:
+                mdl = GraphVAE(**model_kwargs)
+            mdl.load_state_dict(checkpoint["model_state"])
+
+            results = {
+                "model": mdl,
+                "pyg_data": pyg_data,
+                "node_list": node_list,
+                "node_to_idx": node_to_idx,
+                "model_type": checkpoint["model_type"],
+                "metrics": checkpoint["metrics"],
+            }
+        else:
+            st.error("Old training runs require checkpoint format. Please retrain to create a loadable checkpoint.")
+            st.stop()
+
+        session.set_training_results(results)
+        st.rerun()
+
+    st.stop()
 
 model = results["model"]
 pyg_data = results["pyg_data"]
