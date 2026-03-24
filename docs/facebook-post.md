@@ -8,7 +8,7 @@ I tested three architectures head-to-head on the same dataset:
 - GNN (GraphSAGE) — 0.92 AUC. Simple message passing. Won by a wide margin.
 - Graph Transformer — 0.71 AUC. Attention-based. Struggled even with heavy tuning.
 
-Here's the exciting part: I asked the model to predict new gene candidates for Alzheimer's disease — genes not yet in the GWAS database. Its #1 prediction was NR5A1 (Nuclear Receptor Subfamily 5 Group A Member 1) with a 0.98 confidence score. I searched PubMed and found that independent researchers are already investigating the NR5A1-Alzheimer's link in published studies. The model found a real, active research lead on its own.
+Here's the exciting part: I asked the model to predict new gene candidates for Alzheimer's disease — genes not yet in the GWAS database. Its #1 prediction was NR5A1 (Nuclear Receptor Subfamily 5 Group A Member 1) with a 0.98 confidence score. I searched PubMed and found that independent researchers are already investigating the NR5A1-Alzheimer's link in published studies. The model found a real, active research lead on its own — using only publicly available open-source data. No proprietary datasets, no private knowledge, no insider information. Just five open genomic databases and a neural network.
 
 Biggest lesson: the simplest model won. No attention mechanisms, no latent bottlenecks, no positional encodings. Just "average your neighbors' features and learn from that." Biology is already a graph — you don't need to force extra structure onto it.
 
