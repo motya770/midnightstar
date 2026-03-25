@@ -1,4 +1,4 @@
-# pages/2_Explorer.py
+# pages/2_Explorer.py — Network Explorer
 import streamlit as st
 import streamlit.components.v1 as components
 from pyvis.network import Network
@@ -8,13 +8,17 @@ from src.data.bulk_datasets import BulkDatasetManager
 from src.utils import session
 
 st.title("🕸️ Network Explorer")
+st.markdown(
+    "Visualize how genes connect to each other and to diseases through protein interactions. "
+    "Click any node to see its details."
+)
 
 manager = BulkDatasetManager()
 has_any_data = any(manager.is_downloaded(s) for s in ["gwas", "gtex", "hpa", "string"])
 
 # Check if string aliases exist — if not but string is downloaded, build them automatically
 if manager.is_downloaded("string") and not manager.is_downloaded("string_aliases"):
-    with st.spinner("Building STRING gene alias index (one-time, ~25 MB download)..."):
+    with st.spinner("Building gene name index (one-time setup, ~25 MB)..."):
         try:
             manager.build_string_alias_table()
         except Exception as e:
@@ -23,46 +27,77 @@ if manager.is_downloaded("string") and not manager.is_downloaded("string_aliases
 # Data source: bulk datasets or session graph
 graph = session.get_graph()
 
-# Sidebar: gene search + controls
+# ---------------------------------------------------------------------------
+# Sidebar — search and display controls
+# ---------------------------------------------------------------------------
 with st.sidebar:
-    st.subheader("Gene Search")
+    st.subheader("Find a Gene")
 
     if has_any_data:
-        gene_query = st.text_input("Enter gene symbol", placeholder="e.g., TP53, BRCA1, SP4")
-        depth = st.slider("Network depth (hops)", 1, 3, 1)
-        min_score_int = st.slider("Min STRING score", 0, 1000, 400, 50,
-                                  help="STRING combined score (0-1000). 400 = medium, 700 = high, 900 = highest confidence.")
+        gene_query = st.text_input(
+            "Gene symbol",
+            placeholder="e.g., TP53, BRCA1, SP4",
+            help="Type a gene symbol to build its interaction network from downloaded data.",
+        )
+        depth = st.slider(
+            "Network depth",
+            1, 3, 1,
+            help="How many 'hops' away from the gene to include. "
+                 "1 = direct partners only, 2 = partners of partners, etc.",
+        )
+        min_score_int = st.slider(
+            "Min confidence score",
+            0, 1000, 400, 50,
+            help="STRING confidence score (0–1000). "
+                 "400 = medium confidence, 700 = high, 900 = highest. "
+                 "Higher values show fewer but more reliable connections.",
+        )
 
         if gene_query:
             with st.spinner(f"Building network for {gene_query.upper()}..."):
                 graph = manager.build_graph(gene_query.upper(), depth=depth, min_score=min_score_int)
                 session.set_graph(graph)
     else:
-        st.warning("No datasets found. Download them first.")
-        if st.button("Go to Download"):
+        st.warning("No datasets downloaded yet.")
+        if st.button("📥 Go to Download Datasets"):
             st.switch_page("pages/0_Download.py")
 
     st.divider()
-    st.subheader("Display Controls")
-    min_display_score = st.slider("Min display score", 0.0, 1.0, 0.0, 0.05)
+    st.subheader("Display Settings")
+    min_display_score = st.slider(
+        "Min edge score to show",
+        0.0, 1.0, 0.0, 0.05,
+        help="Hide weaker connections to reduce visual clutter.",
+    )
 
     layout_options = {
-        "Force-directed": "forceAtlas2Based",
-        "Hierarchical": "hierarchicalRepulsion",
-        "Repulsion": "repulsion",
+        "Force-directed (default)": "forceAtlas2Based",
+        "Hierarchical (tree)": "hierarchicalRepulsion",
+        "Spread out": "repulsion",
     }
-    layout_name = st.selectbox("Layout", list(layout_options.keys()))
+    layout_name = st.selectbox("Layout style", list(layout_options.keys()))
 
+# ---------------------------------------------------------------------------
+# Empty state
+# ---------------------------------------------------------------------------
 if graph is None or graph.number_of_nodes() == 0:
     if has_any_data:
-        st.info("Enter a gene symbol in the sidebar to explore its interaction network.")
+        st.info(
+            "Enter a gene symbol in the sidebar to explore its interaction network. "
+            "Or, search a gene first on the **Gene Search** page — the network will carry over."
+        )
     else:
-        st.warning("No datasets found in `.datasets/datasets.db`. Go to **Download** to get them.")
-        if st.button("📥 Go to Download"):
+        st.warning(
+            "You need to download datasets before you can explore networks. "
+            "This only takes about 5–10 minutes."
+        )
+        if st.button("📥 Download Datasets"):
             st.switch_page("pages/0_Download.py")
     st.stop()
 
-# Collect available sources from edges
+# ---------------------------------------------------------------------------
+# Source filters
+# ---------------------------------------------------------------------------
 available_sources = set()
 for _, _, data in graph.edges(data=True):
     for s in data.get("sources", [data.get("data_source", "unknown")]):
@@ -70,9 +105,10 @@ for _, _, data in graph.edges(data=True):
 
 with st.sidebar:
     selected_sources = st.multiselect(
-        "Filter by source",
+        "Show data from",
         sorted(available_sources),
         default=sorted(available_sources),
+        help="Filter which data sources are shown in the network.",
     )
 
 # Filter graph
@@ -92,10 +128,12 @@ for node in graph.nodes():
         filtered_nodes.add(node)
 
 if not filtered_nodes:
-    st.info("No nodes match current filters. Try lowering the minimum score.")
+    st.info("No nodes match the current filters. Try lowering the minimum score in the sidebar.")
     st.stop()
 
-# Build Pyvis network
+# ---------------------------------------------------------------------------
+# Build Pyvis network visualization
+# ---------------------------------------------------------------------------
 net = Network(height="600px", width="100%", bgcolor="#0e1117", font_color="white")
 solver = layout_options[layout_name]
 if solver == "hierarchicalRepulsion":
@@ -115,19 +153,21 @@ for node_id in filtered_nodes:
         expr = node_data["expression"]
         if expr:
             top_tissue = max(expr, key=expr.get)
-            title += f"\nTop tissue: {top_tissue} ({expr[top_tissue]:.1f} TPM)"
+            title += f"\nMost active in: {top_tissue} ({expr[top_tissue]:.1f} TPM)"
     if node_data.get("subcellular_location"):
-        title += f"\nLocation: {node_data['subcellular_location']}"
+        title += f"\nCell location: {node_data['subcellular_location']}"
     net.add_node(node_id, label=label, color=color, title=title, size=20)
 
 for u, v, d in filtered_edges:
     width = max(1, d.get("score", 0.5) * 5)
-    title = f"Score: {d.get('score', 'N/A')}\nSource: {d.get('data_source', 'unknown')}"
+    title = f"Confidence: {d.get('score', 'N/A')}\nSource: {d.get('data_source', 'unknown')}"
     if d.get("evidence"):
         title += f"\nEvidence: {d['evidence']}"
     net.add_edge(u, v, width=width, title=title)
 
-# Render
+# ---------------------------------------------------------------------------
+# Render graph + details panel
+# ---------------------------------------------------------------------------
 col_graph, col_details = st.columns([7, 3])
 
 with col_graph:
@@ -138,26 +178,34 @@ with col_graph:
         components.html(html_content, height=620, scrolling=True)
     os.unlink(f.name)
 
+# Legend
+st.markdown(
+    "🔵 **Gene** · 🟣 **Disease** · "
+    "Line thickness = interaction confidence. Hover over nodes and edges for details."
+)
+
 with col_details:
     st.subheader("Node Details")
     node_list = sorted(filtered_nodes)
-    selected = st.selectbox("Select a node", node_list)
+    selected = st.selectbox("Select a node", node_list,
+                            help="Pick a node to see its details, or click one in the graph.")
     if selected:
         node_data = graph.nodes.get(selected, {})
         node_type = node_data.get("node_type", "unknown")
-        st.markdown(f"**{selected}** ({node_type})")
+        type_label = "Gene" if node_type == "gene" else "Disease/Trait" if node_type == "disease" else node_type
+        st.markdown(f"**{selected}** ({type_label})")
 
         if node_data.get("description"):
             st.markdown(f"_{node_data['description']}_")
 
         if node_data.get("subcellular_location"):
-            st.markdown(f"**Location:** {node_data['subcellular_location']}")
+            st.markdown(f"**Found in cell:** {node_data['subcellular_location']}")
 
         if node_data.get("tissue_specificity"):
             st.markdown(f"**Tissue specificity:** {node_data['tissue_specificity']}")
 
         if "expression" in node_data and node_data["expression"]:
-            st.markdown("**Top tissues (TPM):**")
+            st.markdown("**Most active tissues (TPM):**")
             sorted_tissues = sorted(
                 node_data["expression"].items(), key=lambda x: x[1], reverse=True
             )[:5]
@@ -175,7 +223,7 @@ with col_details:
                 for n in sorted(gene_neighbors):
                     edge_data = graph.edges.get((selected, n), {})
                     score = edge_data.get("score", "?")
-                    st.markdown(f"- **{n}** (score: {score})")
+                    st.markdown(f"- **{n}** (confidence: {score})")
 
         if disease_neighbors:
             with st.expander(f"Disease associations ({len(disease_neighbors)})"):
@@ -183,7 +231,8 @@ with col_details:
                     disease_name = graph.nodes.get(n, {}).get("name", n)
                     st.markdown(f"- {disease_name}")
 
-        if st.button("⚙️ Train model on this subgraph"):
+        st.divider()
+        if st.button("⚙️ Train a model on this network"):
             session.set_selected_node(selected)
             st.switch_page("pages/3_Model_Training.py")
 

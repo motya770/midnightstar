@@ -1,26 +1,36 @@
-# pages/7_Data_HPA.py
+# pages/7_Data_HPA.py — Human Protein Atlas Browser
 import streamlit as st
 import pandas as pd
 import sqlite3
 from src.data.bulk_datasets import BulkDatasetManager
 
-st.title("📋 Human Protein Atlas Data")
+st.title("📋 Human Protein Atlas")
+st.markdown(
+    "Browse protein data from the Human Protein Atlas — "
+    "showing **where inside cells** each protein is found, which tissues it's expressed in, "
+    "and what protein class it belongs to."
+)
 
 manager = BulkDatasetManager()
 if not manager.is_downloaded("hpa"):
-    st.warning("HPA data not downloaded. Go to **Download** first.")
+    st.warning("HPA data hasn't been downloaded yet.")
+    st.markdown("Go to **Download Datasets** to get it (~6 MB, takes about 30 seconds).")
     st.stop()
 
 status = manager.get_status()
-st.caption(f"{status['hpa']['row_count']:,} genes — downloaded {status['hpa']['downloaded_at'][:10]}")
+st.caption(f"{status['hpa']['row_count']:,} genes · Downloaded {status['hpa']['downloaded_at'][:10]}")
 
 # Filters
 with st.sidebar:
-    st.subheader("Filters")
-    gene_filter = st.text_input("Gene symbol", placeholder="e.g., TP53")
-    location_filter = st.text_input("Subcellular location", placeholder="e.g., Nucleus")
-    tissue_filter = st.text_input("Tissue expression", placeholder="e.g., brain")
-    protein_class_filter = st.text_input("Protein class", placeholder="e.g., kinase")
+    st.subheader("Filter Results")
+    gene_filter = st.text_input("Gene symbol", placeholder="e.g., TP53",
+                                help="Search by gene name")
+    location_filter = st.text_input("Subcellular location", placeholder="e.g., Nucleus",
+                                    help="Where in the cell the protein is found")
+    tissue_filter = st.text_input("Tissue", placeholder="e.g., brain",
+                                  help="Filter by tissue expression or specificity")
+    protein_class_filter = st.text_input("Protein class", placeholder="e.g., kinase",
+                                         help="Filter by protein type (kinase, receptor, etc.)")
     page_size = st.selectbox("Rows per page", [25, 50, 100, 500], index=1)
 
 # Build query
@@ -63,8 +73,8 @@ with sqlite3.connect(manager.db_path) as conn:
         conn, params=params + [page_size, offset]
     )
 
-st.dataframe(df, width="stretch", height=600)
-st.caption(f"Page {page}/{total_pages} — showing {len(df)} of {total:,} results")
+st.dataframe(df, use_container_width=True, height=600)
+st.caption(f"Page {page} of {total_pages} · Showing {len(df)} of {total:,} results")
 
 csv = df.to_csv(index=False)
-st.download_button("📥 Export current page as CSV", csv, "hpa_data.csv", "text/csv")
+st.download_button("📥 Export this page as CSV", csv, "hpa_data.csv", "text/csv")

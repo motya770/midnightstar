@@ -1,31 +1,47 @@
-# pages/8_Data_STRING.py
+# pages/8_Data_STRING.py — STRING Interactions Browser
 import streamlit as st
 import pandas as pd
 import sqlite3
 from src.data.bulk_datasets import BulkDatasetManager
 
-st.title("📋 STRING Interactions Data")
+st.title("📋 STRING Interactions")
+st.markdown(
+    "Browse protein-protein interaction data from the STRING database — "
+    "showing **which proteins work together**, with confidence scores from multiple evidence types."
+)
 
 manager = BulkDatasetManager()
 if not manager.is_downloaded("string"):
-    st.warning("STRING data not downloaded. Go to **Download** first.")
+    st.warning("STRING data hasn't been downloaded yet.")
+    st.markdown("Go to **Download Datasets** to get it (~133 MB, takes a few minutes).")
     st.stop()
 
 status = manager.get_status()
-st.caption(f"{status['string']['row_count']:,} interactions — downloaded {status['string']['downloaded_at'][:10]}")
+st.caption(f"{status['string']['row_count']:,} interactions · Downloaded {status['string']['downloaded_at'][:10]}")
 
 # Filters
 with st.sidebar:
-    st.subheader("Filters")
-    protein_filter = st.text_input("Protein / Gene", placeholder="e.g., ENSP00000269305 or TP53")
-    min_combined = st.slider("Min combined score", 0, 1000, 700, 50)
+    st.subheader("Filter Results")
+    protein_filter = st.text_input(
+        "Gene or protein ID",
+        placeholder="e.g., TP53 or ENSP00000269305",
+        help="Enter a gene symbol (like TP53) or an Ensembl protein ID. "
+             "Gene symbols are automatically resolved if the alias index is built.",
+    )
+    min_combined = st.slider(
+        "Min confidence score",
+        0, 1000, 700, 50,
+        help="STRING combined score (0–1000). "
+             "400 = medium, 700 = high confidence, 900 = highest confidence.",
+    )
     evidence_type = st.multiselect(
-        "Evidence channels (score > 0)",
+        "Require evidence from",
         ["experimental", "database_score", "textmining", "coexpression", "neighborhood", "fusion", "cooccurence"],
+        help="Only show interactions that have evidence from these specific channels.",
     )
     page_size = st.selectbox("Rows per page", [25, 50, 100, 500], index=1)
 
-# Resolve gene name to protein ID via aliases if available
+# Resolve gene name to protein ID
 resolved_protein = None
 if protein_filter and manager.is_downloaded("string_aliases"):
     with sqlite3.connect(manager.db_path) as conn:
@@ -35,7 +51,7 @@ if protein_filter and manager.is_downloaded("string_aliases"):
         ).fetchone()
         if row:
             resolved_protein = row[0]
-            st.sidebar.caption(f"Resolved to: {resolved_protein}")
+            st.sidebar.caption(f"Resolved to protein: {resolved_protein}")
 
 # Build query
 conditions = ["combined_score >= ?"]
@@ -72,7 +88,7 @@ with sqlite3.connect(manager.db_path) as conn:
         conn, params=params + [page_size, offset]
     )
 
-# Try to add gene symbol columns if aliases are available
+# Add gene symbol columns if aliases are available
 if manager.is_downloaded("string_aliases") and not df.empty:
     with sqlite3.connect(manager.db_path) as conn:
         all_proteins = set(df["protein1"].tolist() + df["protein2"].tolist())
@@ -86,8 +102,8 @@ if manager.is_downloaded("string_aliases") and not df.empty:
     df.insert(1, "gene1", df["protein1"].map(alias_map).fillna(""))
     df.insert(3, "gene2", df["protein2"].map(alias_map).fillna(""))
 
-st.dataframe(df, width="stretch", height=600)
-st.caption(f"Page {page}/{total_pages} — showing {len(df)} of {total:,} results")
+st.dataframe(df, use_container_width=True, height=600)
+st.caption(f"Page {page} of {total_pages} · Showing {len(df)} of {total:,} results")
 
 csv = df.to_csv(index=False)
-st.download_button("📥 Export current page as CSV", csv, "string_data.csv", "text/csv")
+st.download_button("📥 Export this page as CSV", csv, "string_data.csv", "text/csv")
