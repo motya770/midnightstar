@@ -1,105 +1,83 @@
-# I Built a Gene-Disease Discovery Platform Using Deep Learning — Here's What I Learned
+# My Deep Learning Model Predicted a Gene-Alzheimer's Link That Researchers Are Already Investigating
 
-**How Graph Neural Networks can find hidden biological connections that traditional methods miss.**
-
----
-
-Last week I built MidnightStar — an open-source platform that downloads real genomic databases, builds gene interaction networks, and trains deep learning models to predict novel gene-disease correlations.
-
-The result? A GNN model that scores **0.88 AUC-ROC** on link prediction across the human protein interaction network.
-
-Here's the full story.
+**How I built a platform that finds hidden gene-disease connections using only open-source data — and why the simplest model won.**
 
 ---
 
-## The Problem
+I built MidnightStar — a platform that downloads real genomic databases, builds gene interaction networks, and trains deep learning models to predict novel gene-disease connections.
 
-Modern biomedical research generates massive datasets:
-- **1 million+** genetic variant-disease associations (GWAS Catalog)
-- **56,000 genes** with expression data across 54 human tissues (GTEx)
-- **20,000 proteins** with subcellular location and tissue data (Human Protein Atlas)
-- **13.7 million** protein-protein interactions (STRING)
-- **20,000+** predicted protein structures (AlphaFold)
+Then I asked it: which genes might be linked to Alzheimer's disease that aren't yet in the GWAS database?
 
-No human can connect dots across all of this. But a graph neural network can.
+Its #1 prediction was **NR5A1** (Nuclear Receptor Subfamily 5 Group A Member 1) with a 0.98 confidence score. I searched PubMed — and found that independent researchers are already investigating the NR5A1-Alzheimer's link in published studies.
+
+The model surfaced a real, active research lead on its own. Using only publicly available open-source data. No proprietary datasets, no private knowledge. Just five open genomic databases and a neural network.
+
+---
+
+## The Data
+
+Five major open genomic databases, all downloaded locally:
+
+- **STRING** — 13.7 million protein-protein interactions
+- **GWAS Catalog** — 1 million+ genetic variant-disease associations
+- **GTEx** — gene expression across 54 human tissues
+- **Human Protein Atlas** — 20,000 proteins with subcellular location and tissue data
+- **AlphaFold** — 20,000+ predicted protein structures
+
+Everything runs locally in SQLite. No API calls during training. No cloud dependency.
 
 ## The Approach
 
 I treated biology as a graph problem:
 
-**Nodes** = genes and diseases (~32,000)
-**Edges** = known interactions and associations (~470,000 at high confidence)
-**Node features** = tissue expression (54 tissues), structural confidence (AlphaFold pLDDT), protein disorder fraction, network degree
+- **Nodes** = 20,000 genes
+- **Edges** = 230,000 high-confidence protein interactions
+- **Node features** = tissue expression (54 tissues) + AlphaFold structure (pLDDT, disorder, sequence length) + GWAS disease/trait associations + network degree
 
-Then I trained three different models to predict **missing edges** — connections that likely exist but aren't yet in any database:
+Then I trained models to predict **missing edges** — connections that likely exist but aren't yet in any database.
 
-| Model | How it works | What it finds |
-|-------|-------------|---------------|
-| **GNN (GraphSAGE)** | Averages neighbor features through message passing | Genes with similar neighborhoods |
-| **Graph Transformer** | Attention-weighted neighbor aggregation + structural encoding | Subtle long-range patterns |
-| **VAE** | Compresses genes to latent space, reconstructs the network | Hidden clusters and groupings |
+## Head-to-Head: Three Architectures
 
-## The Architecture
+I compared three models on the same 20K-node graph:
 
-Built with Python and Streamlit. The stack:
+| Model | AUC-ROC | What it does |
+|-------|---------|-------------|
+| **GNN (GraphSAGE)** | **0.92** | Averages neighbor features through message passing |
+| **Graph Transformer** | 0.71 | Attention-weighted aggregation + positional encoding |
 
-```
-Data Layer:     GWAS + GTEx + HPA + STRING + AlphaFold → SQLite (2.2 GB local)
-Graph Layer:    NetworkX → PyTorch Geometric
-Model Layer:    GNN / Graph Transformer / VAE → Link prediction
-UI Layer:       Streamlit multi-page app with Pyvis network visualization
-```
+The GNN won by a wide margin. A 2-layer GraphSAGE with 256 hidden dimensions and mean aggregation — the simplest architecture — outperformed every Transformer configuration I tried, including 6-layer models with 512 hidden dimensions and 8 attention heads on A100 GPUs.
 
-Key design decisions:
+## Why Simple Won
 
-**1. Download everything locally.** All 5 databases are bulk-downloaded into SQLite. No API calls during training or exploration. The full human interactome sits in a 2.2 GB database on your machine.
+**Biology is already a graph.** Genes interact with their neighbors, who interact with their neighbors, creating pathway-level patterns. GraphSAGE's message-passing paradigm maps directly onto this structure. It doesn't need attention mechanisms to decide which neighbors matter — the interaction network already encodes that.
 
-**2. Guided ML configuration.** Users pick a model type and adjust hyperparameters through sliders — no code required. The platform was designed for researchers who don't have deep biology or ML backgrounds.
+**The Transformer struggled** because its local attention (TransformerConv) doesn't provide true global context, and the positional encoding (Random Walk Structural Encoding) adds noise rather than signal on large graphs. More parameters didn't help — they just made training unstable.
 
-**3. Multi-source graph building.** STRING protein interactions form the backbone. GTEx expression becomes node features. GWAS associations add disease nodes. HPA provides subcellular location. AlphaFold adds structural confidence. All merged into one graph.
-
-## Results
-
-Training a 2-layer GNN (GraphSAGE, hidden dim 64) on the full human protein interaction network:
-
-- **AUC-ROC: 0.88** — the model correctly ranks real connections above non-connections 88% of the time
-- **Average Precision: 0.85** — 85% of top-ranked predictions are real connections
-- Training time: ~2 minutes on CPU for the full graph
-
-What this means: when the model predicts a new gene-gene connection with high confidence, there's a strong chance it reflects a real biological relationship not yet captured in existing databases.
-
-## What I Learned
-
-**Graph neural networks are remarkably effective on biological networks.** The message-passing paradigm maps naturally onto how biology works — genes influence their interaction partners, who influence their partners, creating pathway-level patterns that GNNs capture inherently.
-
-**Feature engineering matters more than model complexity.** The GNN with simple mean aggregation outperformed the Graph Transformer on this dataset. The expression profiles from GTEx (54-dimensional feature vector per gene) carried more signal than attention-weighted aggregation could add. Start simple.
-
-**The data integration challenge is the real bottleneck.** Building the platform took 3,600+ lines of code. The ML models are ~200 lines. The data clients, caching, graph building, and visualization are the other 3,400. In bioinformatics, getting the data right is 90% of the work.
-
-**AlphaFold adds a new dimension.** Protein structure confidence (pLDDT) and disorder fraction provide information that expression data alone can't capture. Disordered proteins are often interaction hubs — knowing this helps the model understand network topology.
+**Feature engineering mattered more than model complexity.** The 54-dimensional tissue expression profile from GTEx, combined with AlphaFold structural features and GWAS disease associations, gave the GNN everything it needed. The signal was in the data, not the architecture.
 
 ## The Stack
 
-For anyone wanting to build something similar:
+```
+Data Layer:     GWAS + GTEx + HPA + STRING + AlphaFold -> SQLite
+Graph Layer:    NetworkX -> PyTorch Geometric
+Model Layer:    GNN / Graph Transformer / VAE -> Link prediction
+Compute:        Local (CPU/MPS) or remote GPU via Modal (T4/A10G/A100)
+UI Layer:       Streamlit multi-page app with interactive network visualization
+```
 
-- **Streamlit** — Rapid UI prototyping with built-in widgets for ML parameter tuning
-- **PyTorch Geometric** — Graph neural networks with SAGEConv, TransformerConv, GCNConv
-- **NetworkX + Pyvis** — Graph construction and interactive browser-based visualization
-- **SQLite** — Local bulk data storage (no cloud database needed)
-- **3Dmol.js** — Protein structure viewer embedded in the browser
+5,600+ lines of Python. Runs on a laptop or scales to A100 GPUs.
 
-Total: **3,800+ lines of Python**, 54 tests, 50 files, 5 data sources, 3 ML models, 10 Streamlit pages.
+## What I Learned
 
-## What's Next
+**Start with the simplest model.** I spent hours tuning Transformers and VAEs. The 2-layer GNN I trained as a baseline turned out to be the best model. Don't assume complexity equals performance.
 
-- **GNNExplainer integration** — Model-interpretable "why" explanations for each prediction
-- **Multiprocessing training** — Non-blocking UI during large model training runs
-- **Cross-species analysis** — Expand beyond human to model organisms
-- **Drug target scoring** — Combine predicted interactions with druggability databases
+**Data integration is 90% of the work.** The ML models are ~200 lines of code. The data clients, caching, graph construction, feature engineering, and visualization are the other 5,400. In bioinformatics, getting the data right is the real challenge.
+
+**Open data is enough.** Every dataset used here is freely available. No institutional access required. No proprietary knowledge. A neural network trained on public data predicted a gene-disease link that active research is investigating. The tools to do meaningful computational biology are accessible to anyone.
 
 ---
 
-The code is open source. If you're working on computational biology, drug discovery, or just curious about how GNNs work on real biological data — check it out.
+If you're working on computational biology, drug discovery, or applied ML — I'm happy to share more about the approach.
 
 MidnightStar shows that you don't need a supercomputer or a PhD in bioinformatics to find novel gene-disease connections. You need good data, the right graph structure, and a message-passing algorithm that lets biology speak for itself.
 
