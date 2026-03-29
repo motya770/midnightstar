@@ -512,16 +512,34 @@ class BulkDatasetManager:
 
     def query_gene(self, gene_symbol: str) -> dict:
         """Query all downloaded datasets for a gene."""
-        result = {"gwas": [], "gtex": [], "hpa": None, "string": [], "alphafold": None}
+        result = {"gwas": [], "gtex": [], "hpa": None, "string": [], "alphafold": None,
+                  "protein_ids": []}
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
 
-            # GWAS
+            # GWAS — use LIKE for initial candidate fetch, then post-filter
+            # for exact gene-token matches (LIKE '%MET%' would wrongly match
+            # METTL6, METAP2P1, etc.)
             rows = conn.execute(
                 "SELECT * FROM gwas WHERE mapped_gene LIKE ? OR reported_genes LIKE ?",
                 (f"%{gene_symbol}%", f"%{gene_symbol}%")
             ).fetchall()
-            result["gwas"] = [dict(r) for r in rows]
+            gene_upper = gene_symbol.upper()
+            filtered = []
+            for r in rows:
+                d = dict(r)
+                mapped = d.get("mapped_gene", "") or ""
+                reported = d.get("reported_genes", "") or ""
+                # Tokenize comma/semicolon/dash-separated gene lists
+                tokens = {t.strip().upper()
+                          for t in mapped.replace(";", ",").replace(" - ", ",").split(",")
+                          if t.strip()}
+                tokens |= {t.strip().upper()
+                           for t in reported.replace(";", ",").replace(" - ", ",").split(",")
+                           if t.strip()}
+                if gene_upper in tokens:
+                    filtered.append(d)
+            result["gwas"] = filtered
 
             # GTEx
             rows = conn.execute(
@@ -548,6 +566,7 @@ class BulkDatasetManager:
                 ).fetchall()
                 protein_ids = [r[0] for r in alias_rows]
 
+            result["protein_ids"] = protein_ids
             if protein_ids:
                 placeholders = ",".join(["?"] * len(protein_ids))
                 rows = conn.execute(
@@ -628,37 +647,40 @@ class BulkDatasetManager:
                     G.nodes[gene]["subcellular_location"] = hpa.get("subcellular_location", "")
                     G.nodes[gene]["tissue_specificity"] = hpa.get("rna_tissue_specificity", "")
 
-                # Add GWAS disease associations
-                seen_diseases = set()
+                # Add GWAS as categorized node features (same format as build_full_graph)
+                import math
+                gwas_features = {}
+                seen_traits = {}  # (category, trait) -> best score
                 for assoc in data["gwas"]:
-                    disease = assoc.get("disease_trait", "")
-                    if not disease or disease in seen_diseases:
-                        continue
-                    seen_diseases.add(disease)
-                    disease_id = disease.replace(" ", "_")[:50]
-                    if disease_id not in G.nodes:
-                        G.add_node(disease_id, node_type="disease", name=disease,
-                                   description="", id=disease_id)
                     pvalue = assoc.get("pvalue")
-                    score = 0.5
-                    if pvalue and pvalue > 0:
-                        import math
-                        score = min(1.0, -math.log10(pvalue) / 50)
-                    if not G.has_edge(gene, disease_id):
-                        G.add_edge(gene, disease_id, score=round(score, 4),
-                                   data_source="GWAS", sources=["GWAS"],
-                                   type="gene-disease",
-                                   evidence=f"p-value: {pvalue:.2e}" if pvalue else "GWAS")
+                    if not pvalue or pvalue <= 0:
+                        continue
+                    trait_name = assoc.get("mapped_trait") or assoc.get("disease_trait", "")
+                    if not trait_name:
+                        continue
+                    uri = assoc.get("mapped_trait_uri", "")
+                    category = self._classify_gwas_trait(uri)
+                    score = min(1.0, -math.log10(max(pvalue, 1e-300)) / 50)
+                    key = (category, trait_name)
+                    if key not in seen_traits or score > seen_traits[key]:
+                        seen_traits[key] = score
+                for (category, trait_name), score in seen_traits.items():
+                    if category not in gwas_features:
+                        gwas_features[category] = []
+                    gwas_features[category].append({"trait": trait_name, "score": round(score, 4)})
+                if gwas_features:
+                    G.nodes[gene]["gwas"] = gwas_features
 
                 # Add STRING interactions
+                gene_protein_ids = set(data.get("protein_ids", []))
                 for interaction in data["string"]:
                     combined = interaction.get("combined_score", 0)
                     if combined < min_score:
                         continue
                     p1 = interaction["protein1"]
                     p2 = interaction["protein2"]
-                    # Resolve protein IDs to gene symbols via HPA
-                    partner_protein = p2 if gene.upper() in p1.upper() else p1
+                    # Resolve partner: the endpoint that is NOT the query gene's protein
+                    partner_protein = p2 if p1 in gene_protein_ids else p1
                     partner_gene = self._resolve_protein_to_gene(partner_protein)
                     if not partner_gene or partner_gene == gene:
                         continue
@@ -685,6 +707,91 @@ class BulkDatasetManager:
                     next_genes.add(partner_gene)
 
             genes_to_expand = next_genes - visited_genes
+
+        # Enrich any gene nodes that were added as STRING partners but never
+        # expanded (i.e., leaf nodes at the frontier). Without this, depth-1
+        # graphs have nearly all nodes with zero features.
+        import math
+        unenriched = [n for n in G.nodes
+                      if G.nodes[n].get("node_type") == "gene"
+                      and n not in visited_genes]
+        if unenriched:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                tables = {t[0] for t in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()}
+
+                for gene in unenriched:
+                    # GTEx expression
+                    if "gtex" in tables:
+                        rows = conn.execute(
+                            "SELECT tissue, median_tpm FROM gtex WHERE gene_symbol = ?",
+                            (gene,)
+                        ).fetchall()
+                        if rows:
+                            G.nodes[gene]["expression"] = {r["tissue"]: r["median_tpm"] for r in rows}
+
+                    # HPA info
+                    if "hpa" in tables:
+                        hpa_row = conn.execute(
+                            "SELECT gene_description, subcellular_location, rna_tissue_specificity "
+                            "FROM hpa WHERE gene = ?", (gene,)
+                        ).fetchone()
+                        if hpa_row:
+                            G.nodes[gene]["name"] = hpa_row["gene_description"] or gene
+                            G.nodes[gene]["description"] = hpa_row["gene_description"] or ""
+                            G.nodes[gene]["subcellular_location"] = hpa_row["subcellular_location"] or ""
+                            G.nodes[gene]["tissue_specificity"] = hpa_row["rna_tissue_specificity"] or ""
+
+                    # AlphaFold structure
+                    if "alphafold" in tables:
+                        af_row = conn.execute(
+                            "SELECT mean_plddt, disordered_fraction, sequence_length "
+                            "FROM alphafold WHERE gene_symbol = ?", (gene,)
+                        ).fetchone()
+                        if af_row:
+                            G.nodes[gene]["mean_plddt"] = af_row["mean_plddt"]
+                            G.nodes[gene]["disordered_fraction"] = af_row["disordered_fraction"]
+                            G.nodes[gene]["sequence_length"] = af_row["sequence_length"]
+
+                    # GWAS features
+                    if "gwas" in tables:
+                        gwas_rows = conn.execute(
+                            "SELECT disease_trait, pvalue, mapped_trait, mapped_trait_uri, "
+                            "mapped_gene, reported_genes FROM gwas "
+                            "WHERE mapped_gene LIKE ? OR reported_genes LIKE ?",
+                            (f"%{gene}%", f"%{gene}%")
+                        ).fetchall()
+                        gene_upper = gene.upper()
+                        gwas_features = {}
+                        seen_traits = {}
+                        for r in gwas_rows:
+                            # Exact token match (same as query_gene fix)
+                            mapped = (r["mapped_gene"] or "").replace(";", ",").replace(" - ", ",")
+                            reported = (r["reported_genes"] or "").replace(";", ",").replace(" - ", ",")
+                            tokens = {t.strip().upper() for t in mapped.split(",") if t.strip()}
+                            tokens |= {t.strip().upper() for t in reported.split(",") if t.strip()}
+                            if gene_upper not in tokens:
+                                continue
+                            pvalue = r["pvalue"]
+                            if not pvalue or pvalue <= 0:
+                                continue
+                            trait_name = r["mapped_trait"] or r["disease_trait"] or ""
+                            if not trait_name:
+                                continue
+                            uri = r["mapped_trait_uri"] or ""
+                            category = self._classify_gwas_trait(uri)
+                            score = min(1.0, -math.log10(max(pvalue, 1e-300)) / 50)
+                            key = (category, trait_name)
+                            if key not in seen_traits or score > seen_traits[key]:
+                                seen_traits[key] = score
+                        for (category, trait_name), score in seen_traits.items():
+                            if category not in gwas_features:
+                                gwas_features[category] = []
+                            gwas_features[category].append({"trait": trait_name, "score": round(score, 4)})
+                        if gwas_features:
+                            G.nodes[gene]["gwas"] = gwas_features
 
         return G
 
@@ -855,26 +962,10 @@ class BulkDatasetManager:
                     (max_disease_pvalue,)
                 ).fetchall()
 
-            # Classify traits by ontology URI prefix
-            def _classify_trait(uri):
-                if not uri:
-                    return "other"
-                for u in uri.split(", "):
-                    tag = u.rsplit("/", 1)[-1] if "/" in u else ""
-                    if tag.startswith("MONDO") or tag.startswith("Orphanet"):
-                        return "disease"
-                    if tag.startswith("HP"):
-                        return "phenotype"
-                    if tag.startswith("OBA"):
-                        return "measurement"
-                    if tag.startswith("GO"):
-                        return "biological_process"
-                return "trait"  # EFO and others
-
             # Collect per-gene GWAS associations grouped by category
             gwas_by_gene = {}
             for mapped_gene, disease_trait, pvalue, mapped_trait, uri in gwas_rows:
-                category = _classify_trait(uri)
+                category = self._classify_gwas_trait(uri)
                 normalized = mapped_gene.replace(" - ", ",").replace(";", ",")
                 genes = {g.strip() for g in normalized.split(",") if g.strip()}
                 trait_name = mapped_trait or disease_trait
@@ -926,6 +1017,23 @@ class BulkDatasetManager:
                         self._protein_cache[pid] = gene
 
         return self._protein_cache.get(protein_id)
+
+    @staticmethod
+    def _classify_gwas_trait(uri: str) -> str:
+        """Classify a GWAS trait by its ontology URI prefix."""
+        if not uri:
+            return "other"
+        for u in uri.split(", "):
+            tag = u.rsplit("/", 1)[-1] if "/" in u else ""
+            if tag.startswith("MONDO") or tag.startswith("Orphanet"):
+                return "disease"
+            if tag.startswith("HP"):
+                return "phenotype"
+            if tag.startswith("OBA"):
+                return "measurement"
+            if tag.startswith("GO"):
+                return "biological_process"
+        return "trait"  # EFO and others
 
     def build_string_alias_table(self, on_progress=None):
         """Download and index STRING aliases to map protein IDs to gene symbols."""

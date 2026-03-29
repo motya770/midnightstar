@@ -6,8 +6,14 @@ def get_graph() -> nx.Graph | None:
     return st.session_state.get("graph")
 
 
-def set_graph(graph: nx.Graph):
+def set_graph(graph: nx.Graph, name: str | None = None):
     st.session_state["graph"] = graph
+    if name is not None:
+        st.session_state["graph_name"] = name
+
+
+def get_graph_name() -> str | None:
+    return st.session_state.get("graph_name")
 
 
 def get_selected_node() -> str | None:

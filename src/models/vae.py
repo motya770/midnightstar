@@ -38,12 +38,16 @@ class GraphVAE(nn.Module):
         return self.fc_mu(h), self.fc_logvar(h)
 
     def encode(self, data):
-        """Encode returning z (reparameterized). Stores mu/logvar for KL loss."""
+        """Encode returning z. During training, reparameterizes (samples noise)
+        for variational inference. During eval, returns mu directly for
+        deterministic results."""
         x = self._get_x(data)
         mu, logvar = self._encode_raw(x, data.edge_index)
         self._mu = mu
         self._logvar = logvar
-        return self.reparameterize(mu, logvar)
+        if self.training:
+            return self.reparameterize(mu, logvar)
+        return mu
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)

@@ -70,6 +70,14 @@ class GraphTransformerLinkPredictor(nn.Module):
             self.layers.append(TransformerConv(hidden_channels, hidden_channels // num_heads, heads=num_heads))
         self.norms = nn.ModuleList([nn.LayerNorm(hidden_channels) for _ in range(num_layers)])
         self._rw_diag_cache = None  # cached raw walk probabilities
+        self._rw_cache_edge_hash = None  # hash of edge_index used for cache
+
+    @staticmethod
+    def _edge_hash(edge_index: torch.Tensor) -> int:
+        """Fast hash of edge_index tensor for cache invalidation."""
+        # Use shape + sampled values for a fast fingerprint
+        ei = edge_index.cpu()
+        return hash((ei.shape[0], ei.shape[1], ei.sum().item(), ei[0, -1].item() if ei.size(1) > 0 else 0))
 
     def precompute_rwse(self, data):
         """Compute and cache RWSE walk probabilities. Call once before training."""
@@ -80,15 +88,24 @@ class GraphTransformerLinkPredictor(nn.Module):
         with torch.no_grad():
             rw_diag = self.rwse.compute_rw_diag(data.edge_index.cpu(), num_nodes)
         self._rw_diag_cache = rw_diag.to(data.x.device)
+        self._rw_cache_edge_hash = self._edge_hash(data.edge_index)
         print(f"{_time.time()-t0:.1f}s (cached)", flush=True)
+
+    def _cache_valid(self, data, num_nodes: int) -> bool:
+        """Check if cached RWSE matches the current graph topology."""
+        if self._rw_diag_cache is None:
+            return False
+        if self._rw_diag_cache.size(0) != num_nodes:
+            return False
+        return self._rw_cache_edge_hash == self._edge_hash(data.edge_index)
 
     def encode(self, data):
         import time as _time
         num_nodes = data.num_nodes if hasattr(data, "num_nodes") else data.x.size(0)
         target_device = data.x.device
 
-        # Use cached walk probabilities if available, otherwise compute
-        if self._rw_diag_cache is not None and self._rw_diag_cache.size(0) == num_nodes:
+        # Use cached walk probabilities if topology matches, otherwise recompute
+        if self._cache_valid(data, num_nodes):
             rw_diag = self._rw_diag_cache.to(target_device)
         else:
             t0 = _time.time()

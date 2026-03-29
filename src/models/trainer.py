@@ -17,7 +17,6 @@ class TrainConfig:
     epochs: int = 100
     lr: float = 0.001
     batch_size: int = 512
-    num_neighbors: list[int] | None = None
     train_ratio: float = 0.8
     val_ratio: float = 0.1
     early_stopping: bool = False
@@ -71,6 +70,10 @@ class Trainer:
             dst = [e[1] for e in edge_list]
             return torch.tensor([src + dst, dst + src], dtype=torch.long)
 
+        # All original edges (undirected) — used for negative sampling to avoid
+        # labelling any real edge as a negative, regardless of split.
+        all_pos_ei = _to_undirected(edges)
+
         def _make_split(edge_list, msg_edges):
             """Create a Data object with edge_index (for message passing) and
             edge_label_index + edge_label (for supervision)."""
@@ -78,8 +81,9 @@ class Trainer:
             # Positive supervision edges
             pos_src = torch.tensor([e[0] for e in edge_list], dtype=torch.long)
             pos_dst = torch.tensor([e[1] for e in edge_list], dtype=torch.long)
-            # Negative supervision edges
-            neg = negative_sampling(ei, num_nodes=data.num_nodes,
+            # Negative supervision edges — sample against ALL positive edges
+            # (not just msg_edges) to avoid mislabelling val/test edges as negative
+            neg = negative_sampling(all_pos_ei, num_nodes=data.num_nodes,
                                     num_neg_samples=len(edge_list))
             neg_src, neg_dst = neg[0], neg[1]
             # Combine
@@ -109,6 +113,8 @@ class Trainer:
         self._train_data = _make_split(sup_edges, msg_edges).to(self.device)
         self._val_data = _make_split(val_edges, msg_edges).to(self.device)
         self._test_data = _make_split(test_edges, msg_edges).to(self.device)
+        # Keep all original edges for negative sampling during training
+        self._all_pos_ei = all_pos_ei.to(self.device)
 
     # ---- Full-batch training (original) ----
 
@@ -125,9 +131,9 @@ class Trainer:
         pos_src = train_data.edge_label_index[0][pos_mask]
         pos_dst = train_data.edge_label_index[1][pos_mask]
 
-        # Fresh negative samples each epoch for variety
+        # Fresh negative samples each epoch — sample against ALL positive edges
         neg_edge = negative_sampling(
-            edge_index=train_data.edge_index,
+            edge_index=self._all_pos_ei,
             num_nodes=train_data.num_nodes,
             num_neg_samples=pos_src.size(0),
         )
@@ -202,7 +208,7 @@ class Trainer:
         pos_src = train_data.edge_label_index[0][pos_mask]
         pos_dst = train_data.edge_label_index[1][pos_mask]
         neg_edge = negative_sampling(
-            edge_index=train_data.edge_index,
+            edge_index=self._all_pos_ei,
             num_nodes=train_data.num_nodes,
             num_neg_samples=pos_src.size(0),
         )

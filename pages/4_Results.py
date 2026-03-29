@@ -197,14 +197,18 @@ def predict_disease_genes(disease_name, top_k=50):
     for idx in similarities.argsort(descending=True):
         idx = idx.item()
         gene = node_list[idx]
-        if gene not in known_set:
-            candidates.append({
-                "gene": gene,
-                "similarity": round(similarities[idx].item(), 4),
-                "description": graph.nodes[gene].get("name", "") if graph else "",
-            })
-            if len(candidates) >= top_k:
-                break
+        if gene in known_set:
+            continue
+        # Only return gene nodes, not disease or other node types
+        if graph and graph.nodes[gene].get("node_type") != "gene":
+            continue
+        candidates.append({
+            "gene": gene,
+            "similarity": round(similarities[idx].item(), 4),
+            "description": graph.nodes[gene].get("name", "") if graph else "",
+        })
+        if len(candidates) >= top_k:
+            break
 
     return candidates, known_genes
 
@@ -217,14 +221,18 @@ def find_similar_genes(gene_name, top_k=20):
     results_list = []
     for i in sims.argsort(descending=True):
         i = i.item()
-        if node_list[i] != gene_name:
-            results_list.append({
-                "gene": node_list[i],
-                "similarity": round(sims[i].item(), 4),
-                "description": graph.nodes[node_list[i]].get("name", "") if graph else "",
-            })
-            if len(results_list) >= top_k:
-                break
+        node = node_list[i]
+        if node == gene_name:
+            continue
+        if graph and graph.nodes[node].get("node_type") != "gene":
+            continue
+        results_list.append({
+            "gene": node,
+            "similarity": round(sims[i].item(), 4),
+            "description": graph.nodes[node].get("name", "") if graph else "",
+        })
+        if len(results_list) >= top_k:
+            break
     return results_list
 
 
@@ -240,9 +248,9 @@ tab_disease, tab_gene, tab_link = st.tabs([
 # === Tab 1: Disease Gene Discovery ===
 with tab_disease:
     st.markdown(
-        "**Pick a disease** to find genes the model predicts are involved — "
-        "even though they're not yet in the GWAS database. "
-        "These are candidates for further research."
+        "**Pick a disease** to find genes with similar network profiles to known disease genes. "
+        "Genes that cluster near known associations in embedding space are candidates for further research. "
+        "*(This uses embedding similarity, not direct link prediction.)*"
     )
 
     all_diseases = get_all_diseases()

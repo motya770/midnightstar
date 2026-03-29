@@ -52,7 +52,7 @@ if graph is None:
                     with st.spinner(f"Loading {sg['name']}..."):
                         graph = manager.load_graph(sg["name"])
                         if graph:
-                            session.set_graph(graph)
+                            session.set_graph(graph, name=sg["name"])
                             st.rerun()
                         else:
                             st.error("Graph file not found.")
@@ -121,7 +121,7 @@ if graph is None:
                     max_disease_pvalue=max_pvalue,
                     on_progress=lambda msg: progress_text.text(msg),
                 )
-                session.set_graph(graph)
+                session.set_graph(graph, name=graph_name)
                 manager.save_graph(graph, graph_name)
                 progress_text.text(f"Network saved as '{graph_name}'")
             st.rerun()
@@ -150,7 +150,7 @@ if graph is None:
                     except Exception:
                         pass
                 graph = manager.build_graph(gene_input.upper(), depth=depth, min_score=min_score)
-                session.set_graph(graph)
+                session.set_graph(graph, name=graph_name or None)
                 if graph_name:
                     manager.save_graph(graph, graph_name)
             st.rerun()
@@ -167,6 +167,8 @@ def nx_to_pyg(_G, _graph_id):
 
 graph_id = f"{graph.number_of_nodes()}_{graph.number_of_edges()}"
 pyg_data, node_list, node_to_idx = nx_to_pyg(graph, graph_id)
+# Retrieve the real graph name for checkpoint persistence
+_saved_graph_name = session.get_graph_name() or graph_id
 in_channels = pyg_data.x.size(1)
 
 # ---------------------------------------------------------------------------
@@ -235,16 +237,11 @@ with col_config:
                  "Reduces memory usage for networks with >10K genes.",
         )
         batch_size = 512
-        num_neighbors = None
         edge_dropout = 0.0
         if mini_batch:
             batch_size = st.select_slider("Batch size", [16, 32, 64, 128, 256, 512, 1024, 2048], value=512)
             edge_dropout = st.slider("Edge dropout", 0.0, 0.7, 0.3, 0.05,
                                      help="Randomly removes edges during training to prevent overfitting.")
-            neighbor_opt = st.selectbox("Neighbors per layer",
-                                        ["10, 5", "15, 10", "20, 10", "25, 15", "30, 20"],
-                                        index=2)
-            num_neighbors = [int(x) for x in neighbor_opt.split(", ")]
 
     st.divider()
     st.subheader("Where to train")
@@ -328,7 +325,7 @@ with col_monitor:
                            val_ratio=val_ratio, early_stopping=early_stop, patience=10,
                            mini_batch=mini_batch, batch_size=batch_size,
                            edge_dropout=edge_dropout if mini_batch else 0.0,
-                           num_neighbors=num_neighbors, device=device)
+                           device=device)
 
         if compute_mode == "Cloud GPU (Modal)":
             # Remote training via Modal
@@ -415,7 +412,7 @@ with col_monitor:
         run_id = manager.save_training_run(
             model_type=model_type_clean,
             parameters=params_str,
-            graph_name=graph_id,
+            graph_name=_saved_graph_name,
             nodes=pyg_data.num_nodes,
             edges=pyg_data.edge_index.size(1) // 2,
             features=in_channels,
@@ -435,7 +432,7 @@ with col_monitor:
             "model_kwargs": model_kwargs,
             "model_type": model_type_clean,
             "metrics": metrics,
-            "graph_name": graph_id,
+            "graph_name": _saved_graph_name,
         }, os.path.join(checkpoint_dir, f"{model_name}_checkpoint.pt"))
         st.caption(f"Model saved (run #{run_id})")
 
