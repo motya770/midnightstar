@@ -1,6 +1,8 @@
-"""Convert NetworkX graph to PyG Data with node features and GWAS tokens."""
+"""Convert NetworkX graph to PyG Data with node and edge features."""
 import torch
 from torch_geometric.data import Data
+
+EDGE_FEATURE_NAMES = ("score", "experimental", "database", "textmining", "coexpression")
 
 
 def nx_to_pyg_data(G):
@@ -92,16 +94,24 @@ def nx_to_pyg_data(G):
     x[:, deg_col] = x[:, deg_col] / max_deg
 
     # Build edges
-    src, dst = [], []
+    src, dst, edge_attr_rows = [], [], []
     for u, v in G.edges():
         if u in node_to_idx and v in node_to_idx:
+            features = [float(G.edges[u, v].get(name, 0.0)) for name in EDGE_FEATURE_NAMES]
             src.append(node_to_idx[u])
             dst.append(node_to_idx[v])
+            edge_attr_rows.append(features)
             src.append(node_to_idx[v])
             dst.append(node_to_idx[u])
+            edge_attr_rows.append(features)
 
     edge_index = torch.tensor([src, dst], dtype=torch.long) if src else torch.zeros((2, 0), dtype=torch.long)
+    if edge_attr_rows:
+        edge_attr = torch.tensor(edge_attr_rows, dtype=torch.float)
+    else:
+        edge_attr = torch.zeros((0, len(EDGE_FEATURE_NAMES)), dtype=torch.float)
     data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
+    data.edge_attr = edge_attr
     data.gwas_token_ids = gwas_token_ids
     data.gwas_scores = gwas_scores
     data.gwas_cat_ids = gwas_cat_ids

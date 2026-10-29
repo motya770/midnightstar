@@ -170,6 +170,8 @@ pyg_data, node_list, node_to_idx = nx_to_pyg(graph, graph_id)
 # Retrieve the real graph name for checkpoint persistence
 _saved_graph_name = session.get_graph_name() or graph_id
 in_channels = pyg_data.x.size(1)
+edge_attr = getattr(pyg_data, "edge_attr", None)
+edge_dim = edge_attr.size(1) if edge_attr is not None else 0
 
 # ---------------------------------------------------------------------------
 # Three-column layout: Data | Model | Training
@@ -213,8 +215,11 @@ with col_config:
             num_layers = st.slider("Layers", 1, 6, 2)
             hidden_dim = st.select_slider("Hidden dimension", [32, 64, 128, 256, 512], value=64)
             num_heads = st.select_slider("Attention heads", [1, 2, 4, 8], value=4)
-            rwse_k = st.slider("Position encoding depth", 8, 24, 16)
-            rwse_probes = st.select_slider("Position encoding accuracy", [32, 64, 128, 256, 512], value=256)
+            rwse_k = st.slider("Position encoding depth", 0, 16, 8,
+                               help="0 disables RWSE entirely. Lower values are cheaper and often more stable.")
+            rwse_probes = st.select_slider("Position encoding accuracy", [16, 32, 64, 128, 256], value=64)
+            transformer_dropout = st.slider("Dropout", 0.0, 0.5, 0.1, 0.05)
+            transformer_ff_mult = st.select_slider("FFN expansion", [1, 2, 4], value=2)
         st.caption("Transformer uses attention to weigh which gene connections matter most.")
     else:  # VAE
         with st.expander("Model settings", expanded=False):
@@ -228,8 +233,14 @@ with col_config:
         epochs = st.slider("Training rounds (epochs)", 10, 500, 100,
                            help="More epochs = longer training but potentially better results. "
                                 "Early stopping will halt if the model stops improving.")
-        lr = st.select_slider("Learning rate", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=0.001)
+        default_lr = 0.0005 if model_type_clean == "Graph Transformer" else 0.001
+        lr = st.select_slider("Learning rate", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=default_lr)
         early_stop = st.checkbox("Stop early if no improvement", value=True)
+        weight_decay = 0.0
+        warmup_epochs = 0
+        if model_type_clean == "Graph Transformer":
+            weight_decay = st.select_slider("Weight decay", [0.0, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3], value=1e-4)
+            warmup_epochs = st.slider("Warmup epochs", 0, min(20, epochs // 2), min(5, epochs // 2))
         mini_batch = st.checkbox(
             "Use mini-batches (for large networks)",
             value=False,
@@ -287,9 +298,15 @@ with col_monitor:
             model_class = "GraphTransformerLinkPredictor"
             model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
                                 num_layers=num_layers, num_heads=num_heads,
-                                rwse_dim=16, rwse_walk_length=rwse_k,
-                                rwse_probes=rwse_probes, **gwas_params)
-            params_str = f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, lr={lr}, epochs={epochs}"
+                                rwse_dim=8 if rwse_k > 0 else 0, rwse_walk_length=rwse_k,
+                                rwse_probes=rwse_probes, edge_dim=edge_dim,
+                                dropout=transformer_dropout, ff_mult=transformer_ff_mult,
+                                **gwas_params)
+            params_str = (
+                f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, "
+                f"dropout={transformer_dropout}, ff_mult={transformer_ff_mult}, "
+                f"lr={lr}, wd={weight_decay}, warmup={warmup_epochs}, epochs={epochs}"
+            )
         else:
             model_class = "GraphVAE"
             model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
@@ -325,6 +342,7 @@ with col_monitor:
                            val_ratio=val_ratio, early_stopping=early_stop, patience=10,
                            mini_batch=mini_batch, batch_size=batch_size,
                            edge_dropout=edge_dropout if mini_batch else 0.0,
+                           weight_decay=weight_decay, warmup_epochs=warmup_epochs,
                            device=device)
 
         if compute_mode == "Cloud GPU (Modal)":

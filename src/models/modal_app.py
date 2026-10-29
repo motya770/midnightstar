@@ -57,6 +57,8 @@ def _do_train(model_class_name: str, model_kwargs: dict,
     config = TrainConfig(
         epochs=config_dict["epochs"],
         lr=config_dict["lr"],
+        weight_decay=config_dict.get("weight_decay", 0.0),
+        warmup_epochs=config_dict.get("warmup_epochs", 0),
         train_ratio=config_dict["train_ratio"],
         val_ratio=config_dict["val_ratio"],
         early_stopping=config_dict.get("early_stopping", False),

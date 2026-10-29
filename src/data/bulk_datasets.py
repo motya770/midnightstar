@@ -700,9 +700,17 @@ class BulkDatasetManager:
                         evidence_parts.append("co-expression")
 
                     if not G.has_edge(gene, partner_gene):
+                        experimental = interaction.get("experimental", 0) / 1000.0
+                        database = interaction.get("database_score", 0) / 1000.0
+                        textmining = interaction.get("textmining", 0) / 1000.0
+                        coexpression = interaction.get("coexpression", 0) / 1000.0
                         G.add_edge(gene, partner_gene,
                                    score=round(score, 4), data_source="STRING",
                                    sources=["STRING"], type="protein-protein",
+                                   experimental=round(experimental, 4),
+                                   database=round(database, 4),
+                                   textmining=round(textmining, 4),
+                                   coexpression=round(coexpression, 4),
                                    evidence=", ".join(evidence_parts) or "combined")
                     next_genes.add(partner_gene)
 
@@ -748,7 +756,7 @@ class BulkDatasetManager:
                     if "alphafold" in tables:
                         af_row = conn.execute(
                             "SELECT mean_plddt, disordered_fraction, sequence_length "
-                            "FROM alphafold WHERE gene_symbol = ?", (gene,)
+                            "FROM alphafold WHERE gene = ?", (gene,)
                         ).fetchone()
                         if af_row:
                             G.nodes[gene]["mean_plddt"] = af_row["mean_plddt"]
@@ -944,6 +952,10 @@ class BulkDatasetManager:
                 G.add_edge(gene1, gene2,
                            score=round(score / 1000.0, 4),
                            data_source="STRING", sources=["STRING"],
+                           experimental=round(exp / 1000.0, 4),
+                           database=round(db / 1000.0, 4),
+                           textmining=round(tm / 1000.0, 4),
+                           coexpression=round(coex / 1000.0, 4),
                            type="protein-protein",
                            evidence=", ".join(evidence) or "combined")
                 edge_count += 1

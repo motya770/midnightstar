@@ -16,6 +16,8 @@ from tqdm import tqdm
 class TrainConfig:
     epochs: int = 100
     lr: float = 0.001
+    weight_decay: float = 0.0
+    warmup_epochs: int = 0
     batch_size: int = 512
     train_ratio: float = 0.8
     val_ratio: float = 0.1
@@ -35,14 +37,32 @@ class Trainer:
         self.device = torch.device(config.device)
         self.model = model.to(self.device)
 
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
+        self._base_lr = config.lr
+        optimizer_cls = torch.optim.AdamW if config.weight_decay > 0 else torch.optim.Adam
+        initial_lr = config.lr if config.warmup_epochs <= 0 else max(config.lr / config.warmup_epochs, 1e-6)
+        self.optimizer = optimizer_cls(
+            self.model.parameters(),
+            lr=initial_lr,
+            weight_decay=config.weight_decay,
+        )
         self._train_data = None
         self._val_data = None
         self._test_data = None
 
+    def _set_epoch_lr(self, epoch: int):
+        if self.config.warmup_epochs <= 0:
+            lr = self._base_lr
+        else:
+            lr = self._base_lr * min((epoch + 1) / self.config.warmup_epochs, 1.0)
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+
     def _split_data(self, data):
         """Manual edge-level split without RandomLinkSplit (avoids pyg-lib dependency)."""
         edge_index = data.edge_index
+        edge_attr_map = None
+        if hasattr(data, "edge_attr") and data.edge_attr is not None:
+            edge_attr_map = {}
         # Get unique undirected edges
         edge_set = set()
         edges = []
@@ -52,11 +72,12 @@ class Trainer:
             if key not in edge_set:
                 edge_set.add(key)
                 edges.append(key)
+                if edge_attr_map is not None:
+                    edge_attr_map[key] = data.edge_attr[i].clone()
 
         random.shuffle(edges)
         n = len(edges)
         n_train = int(n * self.config.train_ratio)
-        test_ratio = max(0.01, 1.0 - self.config.train_ratio - self.config.val_ratio)
         n_val = int(n * self.config.val_ratio)
 
         train_edges = edges[:n_train]
@@ -65,19 +86,31 @@ class Trainer:
 
         def _to_undirected(edge_list):
             if not edge_list:
-                return torch.zeros((2, 0), dtype=torch.long)
+                empty_ei = torch.zeros((2, 0), dtype=torch.long)
+                if edge_attr_map is None:
+                    return empty_ei, None
+                empty_attr = torch.zeros((0, data.edge_attr.size(-1)), dtype=data.edge_attr.dtype)
+                return empty_ei, empty_attr
             src = [e[0] for e in edge_list]
             dst = [e[1] for e in edge_list]
-            return torch.tensor([src + dst, dst + src], dtype=torch.long)
+            ei = torch.tensor([src + dst, dst + src], dtype=torch.long)
+            if edge_attr_map is None:
+                return ei, None
+            attr_rows = []
+            for edge in edge_list:
+                attr = edge_attr_map[edge]
+                attr_rows.append(attr)
+                attr_rows.append(attr)
+            return ei, torch.stack(attr_rows)
 
         # All original edges (undirected) — used for negative sampling to avoid
         # labelling any real edge as a negative, regardless of split.
-        all_pos_ei = _to_undirected(edges)
+        all_pos_ei, _ = _to_undirected(edges)
 
         def _make_split(edge_list, msg_edges):
             """Create a Data object with edge_index (for message passing) and
             edge_label_index + edge_label (for supervision)."""
-            ei = _to_undirected(msg_edges)
+            ei, edge_attr = _to_undirected(msg_edges)
             # Positive supervision edges
             pos_src = torch.tensor([e[0] for e in edge_list], dtype=torch.long)
             pos_dst = torch.tensor([e[1] for e in edge_list], dtype=torch.long)
@@ -95,6 +128,8 @@ class Trainer:
                 edge_label_index=torch.stack([label_src, label_dst]),
                 edge_label=labels,
             )
+            if edge_attr is not None:
+                split_data.edge_attr = edge_attr
             # Carry GWAS token tensors through splits
             for attr in ("gwas_token_ids", "gwas_scores", "gwas_cat_ids",
                          "gwas_vocab_size", "gwas_num_categories"):
@@ -189,6 +224,9 @@ class Trainer:
             mask = torch.rand(train_data.edge_index.size(1), device=self.device) > dropout
             dropped_ei = train_data.edge_index[:, mask]
             dropped_data = Data(x=train_data.x, edge_index=dropped_ei, num_nodes=train_data.num_nodes)
+            edge_attr = getattr(train_data, "edge_attr", None)
+            if edge_attr is not None:
+                dropped_data.edge_attr = edge_attr[mask]
             for attr in ("gwas_token_ids", "gwas_scores", "gwas_cat_ids",
                          "gwas_vocab_size", "gwas_num_categories"):
                 if hasattr(train_data, attr):
@@ -341,6 +379,7 @@ class Trainer:
 
         epoch_pbar = tqdm(range(self.config.epochs), desc="Epochs", unit="epoch")
         for epoch in epoch_pbar:
+            self._set_epoch_lr(epoch)
             train_loss = train_step()
             val_auc = eval_auc(self._val_data)
 
