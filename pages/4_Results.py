@@ -107,7 +107,13 @@ if results is None:
                 mdl = GraphTransformerLinkPredictor(**model_kwargs)
             else:
                 mdl = GraphVAE(**model_kwargs)
-            mdl.load_state_dict(checkpoint["model_state"])
+            try:
+                mdl.load_state_dict(checkpoint["model_state"])
+            except RuntimeError as e:
+                st.error("This checkpoint was saved with an older model layout and cannot be loaded. "
+                         "Retrain the model to create a compatible checkpoint.")
+                st.caption(str(e)[:300])
+                st.stop()
 
             results = {
                 "model": mdl,
@@ -129,8 +135,8 @@ if results is None:
 # ---------------------------------------------------------------------------
 # Model is loaded — compute embeddings
 # ---------------------------------------------------------------------------
-model = results["model"]
-pyg_data = results["pyg_data"]
+model = results["model"].cpu()  # training may have left it on MPS/CUDA; features live on CPU
+pyg_data = results["pyg_data"].cpu()
 node_list = results["node_list"]
 node_to_idx = results["node_to_idx"]
 metrics = results["metrics"]

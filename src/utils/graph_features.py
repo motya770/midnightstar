@@ -68,9 +68,10 @@ def nx_to_pyg_data(G):
 
         offset = expr_cols
         if has_alphafold:
-            x[i, offset] = G.nodes[n].get("mean_plddt", 0.0) / 100.0
-            x[i, offset + 1] = G.nodes[n].get("disordered_fraction", 0.0)
-            x[i, offset + 2] = G.nodes[n].get("sequence_length", 0) / 5000.0
+            # Keys may be present with None when the database row had NULLs.
+            x[i, offset] = (G.nodes[n].get("mean_plddt") or 0.0) / 100.0
+            x[i, offset + 1] = G.nodes[n].get("disordered_fraction") or 0.0
+            x[i, offset + 2] = (G.nodes[n].get("sequence_length") or 0) / 5000.0
             offset += 3
 
         x[i, offset] = float(G.degree(n))
@@ -112,6 +113,9 @@ def nx_to_pyg_data(G):
         edge_attr = torch.zeros((0, len(EDGE_FEATURE_NAMES)), dtype=torch.float)
     data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
     data.edge_attr = edge_attr
+    # Degree is topology-derived; the trainer recomputes this column from the
+    # message-passing graph so held-out edges cannot leak through it.
+    data.degree_col = deg_col
     data.gwas_token_ids = gwas_token_ids
     data.gwas_scores = gwas_scores
     data.gwas_cat_ids = gwas_cat_ids

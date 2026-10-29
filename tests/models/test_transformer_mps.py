@@ -54,7 +54,6 @@ def test_transformer_mini_batch_training():
 
     history = trainer.train(data)
     assert len(history["train_loss"]) == 3
-    assert history["train_loss"][0] > history["train_loss"][-1] or True  # loss may not always decrease in 3 epochs
 
     metrics = trainer.evaluate(data)
     assert 0.0 <= metrics["auc_roc"] <= 1.0

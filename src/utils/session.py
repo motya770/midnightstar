@@ -1,3 +1,5 @@
+import uuid
+
 import streamlit as st
 import networkx as nx
 
@@ -7,9 +9,17 @@ def get_graph() -> nx.Graph | None:
 
 
 def set_graph(graph: nx.Graph, name: str | None = None):
+    # A new token is issued whenever a different graph object is stored, so caches
+    # keyed on it (e.g. the training-data conversion) cannot serve a stale graph.
+    if st.session_state.get("graph") is not graph or "graph_token" not in st.session_state:
+        st.session_state["graph_token"] = uuid.uuid4().hex
     st.session_state["graph"] = graph
     if name is not None:
         st.session_state["graph_name"] = name
+
+
+def get_graph_token() -> str | None:
+    return st.session_state.get("graph_token")
 
 
 def get_graph_name() -> str | None:

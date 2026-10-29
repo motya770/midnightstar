@@ -52,13 +52,20 @@ class GNNLinkPredictor(nn.Module):
         if self.gwas_encoder is not None and hasattr(data, "gwas_token_ids"):
             gwas_feat = self.gwas_encoder(data.gwas_token_ids, data.gwas_scores, data.gwas_cat_ids)
             x = torch.cat([x, gwas_feat], dim=-1)
-        for conv in self.convs:
+        last = len(self.convs) - 1
+        for i, conv in enumerate(self.convs):
             x = conv(x, data.edge_index)
-            x = torch.relu(x)
+            # No activation on the output layer: a final ReLU makes every embedding
+            # non-negative, so every dot product is >= 0 and every link probability >= 0.5.
+            if i < last:
+                x = torch.relu(x)
         return x
 
+    def decode_logits(self, z, src, dst):
+        return (z[src] * z[dst]).sum(dim=-1)
+
     def decode(self, z, src, dst):
-        return torch.sigmoid((z[src] * z[dst]).sum(dim=-1))
+        return torch.sigmoid(self.decode_logits(z, src, dst))
 
     def forward(self, data, src, dst):
         z = self.encode(data)

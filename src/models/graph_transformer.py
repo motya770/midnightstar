@@ -1,30 +1,35 @@
 # src/models/graph_transformer.py
+import hashlib
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
 from torch_geometric.nn import TransformerConv
 
 
 class RWSEEncoder(nn.Module):
-    """Random Walk Structural Encoding using sparse matrix operations."""
+    """Random Walk Structural Encoding estimated with Hutchinson probes."""
 
-    def __init__(self, walk_length: int = 8, out_dim: int = 8, num_probes: int = 64):
+    def __init__(self, walk_length: int = 8, out_dim: int = 8, num_probes: int = 64, seed: int = 0):
         super().__init__()
         self.walk_length = walk_length
         self.num_probes = num_probes
+        self.seed = seed  # fixed probes: the same graph always yields the same encoding
         self.linear = nn.Linear(walk_length, out_dim)
 
     def compute_rw_diag(self, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
-        """Compute raw random walk return probabilities (no gradients needed)."""
+        """Estimate k-step random-walk return probabilities (no gradients needed)."""
         import time as _time
 
         t0 = _time.time()
-        deg = torch.zeros(num_nodes, device=edge_index.device)
-        deg.scatter_add_(0, edge_index[0], torch.ones(edge_index.size(1), device=edge_index.device))
+        device = edge_index.device
+        deg = torch.zeros(num_nodes, device=device)
+        deg.scatter_add_(0, edge_index[0], torch.ones(edge_index.size(1), device=device))
         deg = deg.clamp(min=1)
 
         row, col = edge_index
         rw_values = 1.0 / deg[row]
-        rw_diag = torch.zeros(num_nodes, self.walk_length, device=edge_index.device)
+        rw_diag = torch.zeros(num_nodes, self.walk_length, device=device)
 
         num_probes = self.num_probes
         print(
@@ -32,7 +37,9 @@ class RWSEEncoder(nn.Module):
             flush=True,
         )
 
-        probes_orig = torch.sign(torch.randn(num_nodes, num_probes, device=edge_index.device))
+        gen = torch.Generator(device=device)
+        gen.manual_seed(self.seed)
+        probes_orig = torch.sign(torch.randn(num_nodes, num_probes, device=device, generator=gen))
         probes = probes_orig.clone()
 
         for k in range(self.walk_length):
@@ -96,6 +103,8 @@ class GraphTransformerBlock(nn.Module):
 
 
 class GraphTransformerLinkPredictor(nn.Module):
+    _RWSE_CACHE_SIZE = 4  # message graph, edge-dropped graph, full graph at inference, spare
+
     def __init__(
         self,
         in_channels: int,
@@ -151,13 +160,23 @@ class GraphTransformerLinkPredictor(nn.Module):
             ]
         )
         self.output_norm = nn.LayerNorm(hidden_channels)
-        self._rw_diag_cache = None
-        self._rw_cache_edge_hash = None
+        # RWSE depends only on topology: cache per edge_index content (not in state_dict).
+        self._rw_cache: OrderedDict[str, torch.Tensor] = OrderedDict()
 
     @staticmethod
-    def _edge_hash(edge_index: torch.Tensor) -> int:
-        ei = edge_index.cpu()
-        return hash((ei.shape[0], ei.shape[1], ei.sum().item(), ei[0, -1].item() if ei.size(1) > 0 else 0))
+    def _edge_hash(edge_index: torch.Tensor) -> str:
+        """Content hash of the edge index (shape + every entry)."""
+        ei = edge_index.detach().cpu().contiguous()
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(repr(tuple(ei.shape)).encode())
+        digest.update(ei.numpy().tobytes())
+        return digest.hexdigest()
+
+    def _store_rwse(self, key: str, rw_diag: torch.Tensor):
+        self._rw_cache[key] = rw_diag
+        self._rw_cache.move_to_end(key)
+        while len(self._rw_cache) > self._RWSE_CACHE_SIZE:
+            self._rw_cache.popitem(last=False)
 
     def precompute_rwse(self, data):
         """Compute and cache RWSE walk probabilities. Call once before training."""
@@ -170,22 +189,17 @@ class GraphTransformerLinkPredictor(nn.Module):
         print(f"[DEBUG] precompute_rwse: RWSE ({num_nodes} nodes)...", end=" ", flush=True)
         with torch.no_grad():
             rw_diag = self.rwse.compute_rw_diag(data.edge_index.cpu(), num_nodes)
-        self._rw_diag_cache = rw_diag.to(data.x.device)
-        self._rw_cache_edge_hash = self._edge_hash(data.edge_index)
+        self._store_rwse(self._edge_hash(data.edge_index), rw_diag.to(data.x.device))
         print(f"{_time.time()-t0:.1f}s (cached)", flush=True)
-
-    def _cache_valid(self, data, num_nodes: int) -> bool:
-        if self._rw_diag_cache is None:
-            return False
-        if self._rw_diag_cache.size(0) != num_nodes:
-            return False
-        return self._rw_cache_edge_hash == self._edge_hash(data.edge_index)
 
     def _get_rwse(self, data, num_nodes: int, target_device: torch.device) -> torch.Tensor | None:
         if self.rwse is None:
             return None
-        if self._cache_valid(data, num_nodes):
-            return self._rw_diag_cache.to(target_device)
+        key = self._edge_hash(data.edge_index)
+        cached = self._rw_cache.get(key)
+        if cached is not None and cached.size(0) == num_nodes:
+            self._rw_cache.move_to_end(key)
+            return cached.to(target_device)
 
         import time as _time
 
@@ -194,6 +208,7 @@ class GraphTransformerLinkPredictor(nn.Module):
         with torch.no_grad():
             rw_diag = self.rwse.compute_rw_diag(data.edge_index.cpu(), num_nodes)
         rw_diag = rw_diag.to(target_device)
+        self._store_rwse(key, rw_diag)
         print(f"{_time.time()-t0:.1f}s", flush=True)
         return rw_diag
 
@@ -217,8 +232,14 @@ class GraphTransformerLinkPredictor(nn.Module):
         print(f"{_time.time()-t0:.1f}s", flush=True)
 
         edge_attr = getattr(data, "edge_attr", None)
-        if edge_attr is None and self.edge_dim > 0:
+        if self.edge_dim <= 0:
+            edge_attr = None  # model has no edge projection; ignore whatever the data carries
+        elif edge_attr is None:
             edge_attr = x.new_zeros((data.edge_index.size(1), self.edge_dim))
+        elif edge_attr.size(-1) != self.edge_dim:
+            raise ValueError(
+                f"edge_attr has {edge_attr.size(-1)} features but the model was built with edge_dim={self.edge_dim}"
+            )
 
         for i, layer in enumerate(self.layers):
             t0 = _time.time()
