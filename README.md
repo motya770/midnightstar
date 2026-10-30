@@ -1,6 +1,22 @@
-# MidnightStar
+<h1 align="center">🧬 MidnightStar</h1>
 
-Find hidden gene–disease connections with graph machine learning.
+<p align="center"><strong>Find hidden gene–disease connections with graph machine learning.</strong></p>
+
+<p align="center">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="PyTorch 2.x" src="https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white">
+  <img alt="PyTorch Geometric 2.5+" src="https://img.shields.io/badge/PyG-2.5%2B-3C2179?logo=pyg&logoColor=white">
+  <img alt="Streamlit" src="https://img.shields.io/badge/Streamlit-app-FF4B4B?logo=streamlit&logoColor=white">
+  <img alt="Modal cloud GPU" src="https://img.shields.io/badge/Modal-cloud%20GPU-7C3AED?logo=modal&logoColor=white">
+  <img alt="Tested with pytest" src="https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white">
+  <img alt="Platform macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey?logo=apple&logoColor=white">
+</p>
+
+<p align="center">
+  <img alt="Built with Python, PyTorch, scikit-learn, SQLite, macOS, Linux and Git" src="https://skillicons.dev/icons?i=python,pytorch,sklearn,sqlite,apple,linux,git">
+  <br>
+  <sub>Python · PyTorch · PyTorch Geometric · scikit-learn · SQLite · Streamlit · Modal</sub>
+</p>
 
 MidnightStar is a local-first Streamlit app that downloads five public genomics
 databases, assembles them into a gene interaction network, trains a graph
@@ -8,7 +24,7 @@ neural network to predict missing links, and lets you explore the results
 without writing code. Everything runs on your machine; the cloud GPU option is
 opt-in.
 
-## What it does
+## 🚀 What it does
 
 1. **Get data** – one-click download of GWAS Catalog, GTEx v8, Human Protein
    Atlas, STRING v12 and AlphaFold confidence scores into a local SQLite
@@ -25,14 +41,14 @@ opt-in.
 5. **Predict** – rank candidate genes for a disease, find genes with similar
    learned profiles, or score a specific gene pair.
 
-## Requirements
+## 📦 Requirements
 
 - Python 3.11 or newer
 - macOS or Linux (on Apple Silicon the GPU is offered as a training target)
 - Roughly 3 GB of free disk for the datasets and saved networks
 - Optional: a [Modal](https://modal.com) account for cloud GPU training
 
-## Setup
+## ⚙️ Setup
 
 ```bash
 git clone <this repo> midnightstar && cd midnightstar
@@ -47,7 +63,7 @@ bulk files take 5–10 minutes, the AlphaFold step queries the public API per
 gene and takes longer. Downloads are one-time and stored under `.datasets/`,
 which is git-ignored.
 
-## Training
+## 🧠 Training
 
 The **Train Model** page converts the current network to a PyTorch Geometric
 graph and trains a link predictor.
@@ -96,7 +112,7 @@ page can reload any checkpoint.
   card to, and restart the app after changing tokens. The source tree is
   shipped with each job, so no deployment step is needed.
 
-## Interpreting predictions
+## 🔍 Interpreting predictions
 
 The training objective is protein–protein link prediction on the STRING
 network. The **Predict Disease Genes** tab ranks genes by cosine similarity of
@@ -110,7 +126,7 @@ The Transformer's positional encoding is a randomised estimate; it is
 deterministic for a given graph, but raising **Position encoding accuracy**
 (the number of probes) reduces its noise at the cost of preprocessing time.
 
-## Development
+## 🛠️ Development
 
 ```bash
 pytest                      # 80 tests, CPU only, about 15 s
@@ -124,7 +140,7 @@ degree feature comes from the message-passing graph, early stopping restores
 the best weights, the mini-batch step replays the same stochastic encoder pass
 and matches the full-batch gradient, and the RWSE cache is deterministic.
 
-### Layout
+### 🗂️ Layout
 
 ```
 app.py                     Streamlit entry point and navigation
@@ -138,7 +154,7 @@ lib/                       Vendored JS assets for the network visualisation
 .datasets/                 Local database, saved networks and checkpoints (git-ignored)
 ```
 
-### Further reading
+### 📚 Further reading
 
 - `docs/graph-transformer-tutorial.md` – how the Graph Transformer link
   predictor works, step by step.
