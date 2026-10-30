@@ -9,11 +9,11 @@
   <img alt="Streamlit" src="https://img.shields.io/badge/Streamlit-app-FF4B4B?logo=streamlit&logoColor=white">
   <img alt="Modal cloud GPU" src="https://img.shields.io/badge/Modal-cloud%20GPU-7C3AED?logo=modal&logoColor=white">
   <img alt="Tested with pytest" src="https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white">
-  <img alt="Platform macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey?logo=apple&logoColor=white">
+  <img alt="Platform macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey">
 </p>
 
 <p align="center">
-  <img alt="Built with Python, PyTorch, scikit-learn, SQLite, macOS, Linux and Git" src="https://skillicons.dev/icons?i=python,pytorch,sklearn,sqlite,apple,linux,git">
+  <img alt="Built with Python, PyTorch, scikit-learn, SQLite, Linux and Git" src="https://skillicons.dev/icons?i=python,pytorch,sklearn,sqlite,linux,git">
   <br>
   <sub>Python · PyTorch · PyTorch Geometric · scikit-learn · SQLite · Streamlit · Modal</sub>
 </p>
