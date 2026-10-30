@@ -53,19 +53,12 @@ def _do_train(model_class_name: str, model_kwargs: dict,
     model = model.to(device)
     pyg_data = pyg_data.to(device)
 
+    from dataclasses import fields
     from src.models.trainer import Trainer, TrainConfig
-    config = TrainConfig(
-        epochs=config_dict["epochs"],
-        lr=config_dict["lr"],
-        train_ratio=config_dict["train_ratio"],
-        val_ratio=config_dict["val_ratio"],
-        early_stopping=config_dict.get("early_stopping", False),
-        patience=config_dict.get("patience", 10),
-        mini_batch=config_dict.get("mini_batch", False),
-        batch_size=config_dict.get("batch_size", 512),
-        edge_dropout=config_dict.get("edge_dropout", 0.3),
-        device=str(device),
-    )
+    # Forward every TrainConfig field the UI sent; the dataclass supplies defaults
+    # for the rest, so new fields never need to be hand-copied here.
+    allowed = {f.name for f in fields(TrainConfig)} - {"device"}
+    config = TrainConfig(**{k: v for k, v in config_dict.items() if k in allowed}, device=str(device))
     trainer = Trainer(model, config)
     history = trainer.train(pyg_data)
     metrics = trainer.evaluate(pyg_data)

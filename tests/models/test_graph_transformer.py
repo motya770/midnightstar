@@ -7,7 +7,8 @@ from src.models.graph_transformer import GraphTransformerLinkPredictor
 def _make_data(num_nodes=5, in_channels=8):
     x = torch.randn(num_nodes, in_channels)
     edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
-    return Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
+    edge_attr = torch.rand(edge_index.size(1), 5)
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_nodes=num_nodes)
 
 
 def test_transformer_forward_shape():
@@ -37,3 +38,17 @@ def test_transformer_different_configs():
         )
         out = model(data, src, dst)
         assert out.shape == (2,), f"Config ({num_layers}, {hidden}, {heads}): expected (2,), got {out.shape}"
+
+
+def test_transformer_without_rwse_still_works():
+    data = _make_data(num_nodes=6, in_channels=4)
+    model = GraphTransformerLinkPredictor(
+        in_channels=4,
+        hidden_channels=16,
+        num_layers=2,
+        num_heads=4,
+        rwse_dim=0,
+        rwse_walk_length=0,
+    )
+    z = model.encode(data)
+    assert z.shape == (6, 16)

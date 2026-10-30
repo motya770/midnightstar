@@ -159,17 +159,22 @@ if graph is None:
 # ---------------------------------------------------------------------------
 # Convert graph to training format
 # ---------------------------------------------------------------------------
-@st.cache_data(show_spinner="Preparing training data...")
-def nx_to_pyg(_G, _graph_id):
-    """_G prefixed with _ to tell Streamlit not to hash it. _graph_id is used for cache key."""
+@st.cache_data(show_spinner="Preparing training data...", max_entries=3)
+def nx_to_pyg(_G, graph_token):
+    """_G is excluded from hashing (underscore prefix). graph_token IS hashed and
+    changes whenever a different graph is stored in the session, so a rebuilt or
+    reloaded network can never be served the previous network's tensors."""
     from src.utils.graph_features import nx_to_pyg_data
     return nx_to_pyg_data(_G)
 
 graph_id = f"{graph.number_of_nodes()}_{graph.number_of_edges()}"
-pyg_data, node_list, node_to_idx = nx_to_pyg(graph, graph_id)
+graph_token = session.get_graph_token() or f"{graph_id}_{id(graph)}"
+pyg_data, node_list, node_to_idx = nx_to_pyg(graph, graph_token)
 # Retrieve the real graph name for checkpoint persistence
 _saved_graph_name = session.get_graph_name() or graph_id
 in_channels = pyg_data.x.size(1)
+edge_attr = getattr(pyg_data, "edge_attr", None)
+edge_dim = edge_attr.size(1) if edge_attr is not None else 0
 
 # ---------------------------------------------------------------------------
 # Three-column layout: Data | Model | Training
@@ -183,11 +188,17 @@ with col_data:
     st.metric("Features per gene", in_channels)
 
     with st.expander("Advanced: data split"):
-        train_ratio = st.slider("Training data %", 50, 90, 80, 5,
-                                help="Percentage of edges used for training. Rest is used for validation and testing.")
-        train_ratio = train_ratio / 100
-        val_ratio = st.slider("Validation data %", 5, 30, 10, 5)
-        val_ratio = val_ratio / 100
+        train_pct = st.slider("Training data %", 50, 90, 80, 5,
+                              help="Percentage of edges used for training. The rest is split between validation and testing.")
+        max_val_pct = min(30, 95 - train_pct)  # always leave at least 5% of edges for testing
+        if max_val_pct > 5:
+            val_pct = st.slider("Validation data %", 5, max_val_pct, min(10, max_val_pct), 5)
+        else:
+            val_pct = 5
+            st.caption("Validation data: 5%")
+        st.caption(f"Test data: {100 - train_pct - val_pct}% of edges")
+        train_ratio = train_pct / 100
+        val_ratio = val_pct / 100
 
 with col_config:
     st.subheader("Model Selection")
@@ -213,8 +224,11 @@ with col_config:
             num_layers = st.slider("Layers", 1, 6, 2)
             hidden_dim = st.select_slider("Hidden dimension", [32, 64, 128, 256, 512], value=64)
             num_heads = st.select_slider("Attention heads", [1, 2, 4, 8], value=4)
-            rwse_k = st.slider("Position encoding depth", 8, 24, 16)
-            rwse_probes = st.select_slider("Position encoding accuracy", [32, 64, 128, 256, 512], value=256)
+            rwse_k = st.slider("Position encoding depth", 0, 16, 8,
+                               help="0 disables RWSE entirely. Lower values are cheaper and often more stable.")
+            rwse_probes = st.select_slider("Position encoding accuracy", [16, 32, 64, 128, 256], value=64)
+            transformer_dropout = st.slider("Dropout", 0.0, 0.5, 0.1, 0.05)
+            transformer_ff_mult = st.select_slider("FFN expansion", [1, 2, 4], value=2)
         st.caption("Transformer uses attention to weigh which gene connections matter most.")
     else:  # VAE
         with st.expander("Model settings", expanded=False):
@@ -228,8 +242,18 @@ with col_config:
         epochs = st.slider("Training rounds (epochs)", 10, 500, 100,
                            help="More epochs = longer training but potentially better results. "
                                 "Early stopping will halt if the model stops improving.")
-        lr = st.select_slider("Learning rate", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=0.001)
-        early_stop = st.checkbox("Stop early if no improvement", value=True)
+        default_lr = 0.0005 if model_type_clean == "Graph Transformer" else 0.001
+        lr = st.select_slider("Learning rate", [0.0001, 0.0005, 0.001, 0.005, 0.01], value=default_lr)
+        early_stop = st.checkbox("Stop early if no improvement", value=True,
+                                 help="Keeps the weights from the best validation epoch.")
+        seed = int(st.number_input("Random seed", min_value=0, max_value=2**31 - 1, value=42, step=1,
+                                   help="Same seed = same data split, negatives and initialization, "
+                                        "so different models can be compared on equal footing."))
+        weight_decay = 0.0
+        warmup_epochs = 0
+        if model_type_clean == "Graph Transformer":
+            weight_decay = st.select_slider("Weight decay", [0.0, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3], value=1e-4)
+            warmup_epochs = st.slider("Warmup epochs", 0, min(20, epochs // 2), min(5, epochs // 2))
         mini_batch = st.checkbox(
             "Use mini-batches (for large networks)",
             value=False,
@@ -287,16 +311,25 @@ with col_monitor:
             model_class = "GraphTransformerLinkPredictor"
             model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
                                 num_layers=num_layers, num_heads=num_heads,
-                                rwse_dim=16, rwse_walk_length=rwse_k,
-                                rwse_probes=rwse_probes, **gwas_params)
-            params_str = f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, lr={lr}, epochs={epochs}"
+                                rwse_dim=8 if rwse_k > 0 else 0, rwse_walk_length=rwse_k,
+                                rwse_probes=rwse_probes, edge_dim=edge_dim,
+                                dropout=transformer_dropout, ff_mult=transformer_ff_mult,
+                                **gwas_params)
+            params_str = (
+                f"layers={num_layers}, hidden={hidden_dim}, heads={num_heads}, rwse_k={rwse_k}, "
+                f"dropout={transformer_dropout}, ff_mult={transformer_ff_mult}, "
+                f"lr={lr}, wd={weight_decay}, warmup={warmup_epochs}, epochs={epochs}"
+            )
         else:
             model_class = "GraphVAE"
             model_kwargs = dict(in_channels=in_channels, hidden_channels=hidden_dim,
                                 latent_dim=latent_dim, num_layers=num_layers, beta=beta, **gwas_params)
             params_str = f"layers={num_layers}, hidden={hidden_dim}, latent={latent_dim}, beta={beta}, lr={lr}, epochs={epochs}"
 
-        # Create local model
+        params_str += f", seed={seed}"
+
+        # Create local model (seeded so initialization is reproducible)
+        torch.manual_seed(seed)
         if model_type_clean == "GNN":
             model = GNNLinkPredictor(**model_kwargs)
         elif model_type_clean == "Graph Transformer":
@@ -325,7 +358,8 @@ with col_monitor:
                            val_ratio=val_ratio, early_stopping=early_stop, patience=10,
                            mini_batch=mini_batch, batch_size=batch_size,
                            edge_dropout=edge_dropout if mini_batch else 0.0,
-                           device=device)
+                           weight_decay=weight_decay, warmup_epochs=warmup_epochs,
+                           seed=seed, device=device)
 
         if compute_mode == "Cloud GPU (Modal)":
             # Remote training via Modal
@@ -367,7 +401,11 @@ with col_monitor:
 
         if compute_mode in ("This computer (CPU)", "This Mac's GPU"):
             # Local training
-            config = TrainConfig(**config_dict)
+            try:
+                config = TrainConfig(**config_dict)
+            except ValueError as e:
+                st.error(f"Invalid training settings: {e}")
+                st.stop()
             trainer = Trainer(model, config)
 
             progress_bar = st.progress(0)
@@ -386,11 +424,17 @@ with col_monitor:
                 loss_chart.line_chart(df)
 
             device_label = "Mac GPU" if device == "mps" else "CPU"
-            with st.spinner(f"Training on {device_label}..."):
-                history = trainer.train(pyg_data, on_epoch=on_epoch)
-
-            metrics = trainer.evaluate(pyg_data)
-            st.success(f"Training complete!")
+            try:
+                with st.spinner(f"Training on {device_label}..."):
+                    history = trainer.train(pyg_data, on_epoch=on_epoch)
+                metrics = trainer.evaluate(pyg_data)
+            except ValueError as e:
+                st.error(f"Training could not start: {e}")
+                st.stop()
+            # The trainer moved the model to the training device in place; bring it
+            # back to CPU so the Results page can encode the CPU feature tensors.
+            model = model.cpu()
+            st.success("Training complete!")
 
         # Show results
         st.divider()
@@ -433,6 +477,7 @@ with col_monitor:
             "model_type": model_type_clean,
             "metrics": metrics,
             "graph_name": _saved_graph_name,
+            "train_config": config_dict,
         }, os.path.join(checkpoint_dir, f"{model_name}_checkpoint.pt"))
         st.caption(f"Model saved (run #{run_id})")
 
@@ -447,8 +492,9 @@ with col_monitor:
             "model_type": model_type_clean,
         })
 
-        if st.button("📊 See Predictions"):
-            st.switch_page("pages/4_Results.py")
+        # A plain button here could never fire: clicking it reruns the page with
+        # "Start Training" back to False, so this whole block would be skipped.
+        st.page_link("pages/4_Results.py", label="📊 See Predictions")
 
 # ---------------------------------------------------------------------------
 # Training history
