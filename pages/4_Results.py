@@ -8,8 +8,21 @@ import numpy as np
 from pyvis.network import Network
 import tempfile
 import os
+import datetime
 import glob as glob_mod
 from src.utils import session
+from src.utils.discovery import (
+    index_disease_genes,
+    known_links_rows,
+    predict_gene_disease_links,
+    select_diseases,
+)
+from src.utils.discovery_export import (
+    PREDICTED_FILE,
+    build_manifest,
+    write_discovery_bundle,
+    zip_bundle,
+)
 from src.models.gnn import GNNLinkPredictor
 from src.models.graph_transformer import GraphTransformerLinkPredictor
 from src.models.vae import GraphVAE
@@ -32,7 +45,7 @@ if graph is None:
     if saved_graphs:
         graph = _mgr.load_graph(saved_graphs[0]["name"])
         if graph:
-            session.set_graph(graph)
+            session.set_graph(graph, name=saved_graphs[0]["name"])
 
 # ---------------------------------------------------------------------------
 # No model loaded — let user pick one
@@ -92,7 +105,7 @@ if results is None:
             if graph is None and graph_name:
                 graph = _mgr.load_graph(graph_name)
                 if graph:
-                    session.set_graph(graph)
+                    session.set_graph(graph, name=graph_name)
 
             if graph is None:
                 st.error("No network data available. Go to **Train Model** to build or load a network first.")
@@ -122,6 +135,7 @@ if results is None:
                 "node_to_idx": node_to_idx,
                 "model_type": checkpoint["model_type"],
                 "metrics": checkpoint["metrics"],
+                "checkpoint_path": meta,
             }
         else:
             st.error("Old training runs require checkpoint format. Please retrain to create a loadable checkpoint.")
@@ -465,14 +479,109 @@ with tab_link:
                                 f"{', '.join(list(shared)[:15])}")
 
 # ---------------------------------------------------------------------------
-# Save/Export
+# Save / Export
 # ---------------------------------------------------------------------------
 st.divider()
-col_save, col_export = st.columns(2)
-with col_save:
-    if st.button("💾 Save Model to Disk"):
-        save_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".models")
-        os.makedirs(save_dir, exist_ok=True)
-        path = os.path.join(save_dir, f"{model_type.lower().replace(' ', '_')}_model.pt")
-        torch.save(model.state_dict(), path)
-        st.success(f"Model saved to `{path}`")
+if st.button("💾 Save Model to Disk"):
+    save_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".models")
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, f"{model_type.lower().replace(' ', '_')}_model.pt")
+    torch.save(model.state_dict(), path)
+    st.success(f"Model saved to `{path}`")
+
+st.subheader("📦 Export discoveries")
+st.markdown(
+    "Write **every predicted gene–disease connection** for the diseases selected below to a "
+    "folder of CSV files, with a manifest describing the model and method. Grant that folder "
+    "to Claude Science (or open it in any other tool) to continue the analysis there."
+)
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+disease_index = index_disease_genes(graph, node_list) if graph else {}
+
+if not disease_index:
+    st.info("No disease/GWAS data in the network, so there is nothing to export.")
+else:
+    export_categories = sorted({rec["category"] for rec in disease_index.values()})
+    with st.form("export_discoveries"):
+        col_cat, col_min, col_k = st.columns(3)
+        with col_cat:
+            exp_categories = st.multiselect(
+                "Categories",
+                export_categories,
+                default=["disease"] if "disease" in export_categories else export_categories[:1],
+            )
+        with col_min:
+            exp_min_genes = st.slider(
+                "Min known genes per disease", 2, 50, 5,
+                help="Diseases with fewer known genes are skipped; more known genes = better signatures.",
+            )
+        with col_k:
+            exp_top_k = st.slider("Candidates per disease", 10, 200, 50)
+        exp_dir = st.text_input(
+            "Export folder",
+            value=os.path.join(_PROJECT_ROOT, ".datasets", "exports"),
+            help="A time-stamped sub-folder is created here. Grant it to Claude Science afterwards.",
+        )
+        exp_submit = st.form_submit_button("📦 Export all predicted connections", type="primary")
+
+    if exp_submit:
+        chosen = select_diseases(disease_index, exp_categories, exp_min_genes)
+        if not chosen:
+            st.warning("No diseases match these filters. Lower the minimum known genes or add categories.")
+        else:
+            try:
+                with st.spinner(f"Scoring candidates for {len(chosen)} diseases..."):
+                    links = predict_gene_disease_links(
+                        z_norm, node_list, node_to_idx, graph, disease_index, chosen, exp_top_k,
+                    )
+                    known = known_links_rows(disease_index, chosen)
+                    manifest = build_manifest(
+                        model_type=model_type,
+                        metrics=metrics,
+                        checkpoint_path=results.get("checkpoint_path"),
+                        graph_name=session.get_graph_name(),
+                        n_nodes=pyg_data.num_nodes,
+                        n_edges=pyg_data.edge_index.size(1) // 2,
+                        embedding_dim=z.size(1),
+                        categories=exp_categories,
+                        min_known_genes=exp_min_genes,
+                        top_k=exp_top_k,
+                        links=links,
+                        known=known,
+                    )
+                    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    bundle = write_discovery_bundle(
+                        os.path.join(exp_dir, f"discovery_{stamp}"), links, known, manifest,
+                    )
+            except OSError as e:
+                st.error(f"Could not write to `{exp_dir}`: {e}")
+            else:
+                st.session_state["discovery_export"] = {
+                    "model_token": id(model),
+                    "dir": str(bundle),
+                    "zip": zip_bundle(bundle),
+                    "links": links,
+                    "manifest": manifest,
+                }
+
+    export = st.session_state.get("discovery_export")
+    if export and export["model_token"] == id(model):
+        counts = export["manifest"]["counts"]
+        st.success(
+            f"Exported {counts['predicted_links']:,} predicted connections for "
+            f"{counts['diseases']} diseases to `{export['dir']}`"
+        )
+        st.caption(
+            "In Claude Science: paste this folder's path into the composer, allow read access, "
+            f"and ask Claude to load `{PREDICTED_FILE}` and save it as an artifact."
+        )
+        if export["links"]:
+            st.markdown("**Preview (first 20 rows):**")
+            st.dataframe(pd.DataFrame(export["links"]).head(20), height=300)
+        st.download_button(
+            "📥 Download bundle as zip",
+            export["zip"],
+            f"{os.path.basename(export['dir'])}.zip",
+            "application/zip",
+        )
