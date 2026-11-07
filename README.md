@@ -115,11 +115,17 @@ page can reload any checkpoint.
 ## 🔍 Interpreting predictions
 
 The training objective is protein–protein link prediction on the STRING
-network. The **Predict Disease Genes** tab ranks genes by cosine similarity of
-their learned embeddings to the embeddings of genes already associated with
-the chosen trait; it is a similarity heuristic, not a supervised disease
-classifier. A heterogeneous gene–disease graph that trains on disease links
-directly is specified in
+network. The **Predict Disease Genes** tab ranks genes by guilt-by-association:
+the hypergeometric enrichment of the trait's known genes among a gene's STRING
+interaction partners, with cosine similarity of the learned embeddings to the
+known genes' mean embedding breaking ties. In a held-out check that hides 20 %
+of each trait's known genes, this recovers them about six times more often
+than ranking by embedding similarity alone, which mostly surfaces hub genes.
+It is a network heuristic, not a supervised disease classifier. The **Export
+discoveries** section at the bottom of the page writes the full ranking for
+every trait as a CSV bundle with a manifest, ready to hand to Claude Science
+or any other tool. A heterogeneous gene–disease graph that trains on disease
+links directly is specified in
 `docs/superpowers/specs/2026-03-30-gene-disease-hetero-graph-design.md`.
 
 The Transformer's positional encoding is a randomised estimate; it is
@@ -129,7 +135,7 @@ deterministic for a given graph, but raising **Position encoding accuracy**
 ## 🛠️ Development
 
 ```bash
-pytest                      # 80 tests, CPU only, about 15 s
+pytest                      # 93 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 

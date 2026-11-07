@@ -17,8 +17,8 @@ MANIFEST_FILE = "manifest.json"
 README_FILE = "README.md"
 
 PREDICTED_COLUMNS = (
-    "disease", "category", "gene", "gene_description", "similarity", "rank",
-    "n_known_genes", "known_interactors", "known_interactor_genes",
+    "disease", "category", "gene", "gene_description", "enrichment_score", "similarity",
+    "rank", "n_known_genes", "known_interactors", "degree", "known_interactor_genes",
 )
 KNOWN_COLUMNS = ("disease", "category", "gene", "gwas_score")
 
@@ -27,10 +27,14 @@ PREDICTED_COLUMN_DOCS = {
     "category": "Trait category assigned by MidnightStar (disease, trait, ...)",
     "gene": "Candidate gene symbol; never one already associated with the disease",
     "gene_description": "Protein description from the Human Protein Atlas, when known",
-    "similarity": "Cosine similarity between the gene's embedding and the disease signature (higher = stronger)",
-    "rank": "1 = most similar candidate for that disease",
-    "n_known_genes": "Number of known disease genes that formed the signature",
+    "enrichment_score": "Primary ranking score: -log10 hypergeometric p-value that the gene's STRING partners "
+                        "contain at least the observed number of known disease genes (0 = no known partner)",
+    "similarity": "Cosine similarity between the gene's embedding and the disease signature; "
+                  "breaks ties in enrichment_score only",
+    "rank": "1 = strongest candidate for that disease",
+    "n_known_genes": "Number of known disease genes used as the seed set",
     "known_interactors": "How many known disease genes have a STRING interaction with the candidate",
+    "degree": "Number of STRING interaction partners of the candidate",
     "known_interactor_genes": "Up to ten of those known interactors, separated by ';'",
 }
 KNOWN_COLUMN_DOCS = {
@@ -41,11 +45,14 @@ KNOWN_COLUMN_DOCS = {
 }
 
 METHOD_TEXT = (
-    "A link-prediction model was trained on the STRING protein interaction network. "
-    "For each disease, the normalised mean embedding of its known GWAS genes forms a "
-    "disease signature; every other gene is scored by cosine similarity to that "
-    "signature and the top-k are reported. This is an embedding-similarity heuristic, "
-    "not a supervised disease classifier, and candidates are hypotheses for follow-up."
+    "Candidates are ranked by guilt-by-association on the STRING protein interaction "
+    "network: for each disease, every gene is scored by the hypergeometric enrichment of "
+    "known GWAS genes among its interaction partners (-log10 p, population = all genes in "
+    "the network). Ties, in particular genes with no known partner, are broken by cosine "
+    "similarity between the gene's embedding and the disease signature (the normalised "
+    "mean embedding of the known genes) from a link-prediction model trained on the same "
+    "network. This is a network-based heuristic, not a supervised disease classifier, and "
+    "candidates are hypotheses for follow-up."
 )
 
 

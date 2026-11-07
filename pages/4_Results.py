@@ -169,68 +169,10 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Helper data
 # ---------------------------------------------------------------------------
-def get_disease_genes(disease_name):
-    genes = []
-    for node in node_list:
-        gwas = graph.nodes[node].get("gwas", {}) if graph else {}
-        for cat, entries in gwas.items():
-            for entry in entries:
-                if disease_name.lower() in entry["trait"].lower():
-                    genes.append((node, entry["trait"], entry["score"], cat))
-    return genes
-
-
-def get_all_diseases():
-    diseases = {}
-    if not graph:
-        return diseases
-    for node in node_list:
-        gwas = graph.nodes[node].get("gwas", {})
-        for cat, entries in gwas.items():
-            for entry in entries:
-                trait = entry["trait"]
-                if trait not in diseases:
-                    diseases[trait] = {"category": cat, "gene_count": 0}
-                diseases[trait]["gene_count"] += 1
-    return diseases
-
-
-def predict_disease_genes(disease_name, top_k=50):
-    known = get_disease_genes(disease_name)
-    known_genes = list({g[0] for g in known})
-    if not known_genes:
-        return [], known_genes
-
-    known_indices = [node_to_idx[g] for g in known_genes if g in node_to_idx]
-    if not known_indices:
-        return [], known_genes
-
-    disease_sig = z_norm[known_indices].mean(dim=0, keepdim=True)
-    disease_sig = F.normalize(disease_sig, dim=-1)
-
-    similarities = (z_norm @ disease_sig.T).squeeze()
-
-    known_set = set(known_genes)
-    candidates = []
-    for idx in similarities.argsort(descending=True):
-        idx = idx.item()
-        gene = node_list[idx]
-        if gene in known_set:
-            continue
-        # Only return gene nodes, not disease or other node types
-        if graph and graph.nodes[gene].get("node_type") != "gene":
-            continue
-        candidates.append({
-            "gene": gene,
-            "similarity": round(similarities[idx].item(), 4),
-            "description": graph.nodes[gene].get("name", "") if graph else "",
-        })
-        if len(candidates) >= top_k:
-            break
-
-    return candidates, known_genes
+# Known GWAS associations per trait (exact trait names), shared by the disease tab and the export.
+disease_index = index_disease_genes(graph, node_list) if graph else {}
 
 
 def find_similar_genes(gene_name, top_k=20):
@@ -268,16 +210,16 @@ tab_disease, tab_gene, tab_link = st.tabs([
 # === Tab 1: Disease Gene Discovery ===
 with tab_disease:
     st.markdown(
-        "**Pick a disease** to find genes with similar network profiles to known disease genes. "
-        "Genes that cluster near known associations in embedding space are candidates for further research. "
-        "*(This uses embedding similarity, not direct link prediction.)*"
+        "**Pick a disease** to rank candidate genes by how strongly their STRING interaction "
+        "partners are enriched for the disease's known genes (guilt-by-association). Ties, "
+        "mostly genes with no known partner, are broken by similarity of the model's learned "
+        "profiles. Candidates are hypotheses for follow-up, not a diagnosis."
     )
 
-    all_diseases = get_all_diseases()
-    if all_diseases:
+    if disease_index:
         col_cat, col_min = st.columns(2)
         with col_cat:
-            categories = sorted({v["category"] for v in all_diseases.values()})
+            categories = sorted({v["category"] for v in disease_index.values()})
             sel_cat = st.multiselect(
                 "Category",
                 categories,
@@ -291,20 +233,23 @@ with tab_disease:
                      "More known genes = better predictions.",
             )
 
-        filtered = {k: v for k, v in all_diseases.items()
-                    if v["category"] in sel_cat and v["gene_count"] >= min_genes}
-        disease_options = sorted(filtered.keys(), key=lambda x: filtered[x]["gene_count"], reverse=True)
+        filtered = {k: v for k, v in disease_index.items()
+                    if v["category"] in sel_cat and len(v["genes"]) >= min_genes}
+        disease_options = sorted(filtered.keys(), key=lambda x: len(filtered[x]["genes"]), reverse=True)
 
         if disease_options:
             selected_disease = st.selectbox(
                 f"Disease or trait ({len(disease_options)} available)",
                 disease_options,
-                format_func=lambda x: f"{x} ({filtered[x]['gene_count']} known genes)",
+                format_func=lambda x: f"{x} ({len(filtered[x]['genes'])} known genes)",
             )
             top_k = st.slider("How many predictions?", 10, 200, 50)
 
             if st.button("🔮 Predict New Genes", type="primary"):
-                candidates, known_genes = predict_disease_genes(selected_disease, top_k)
+                known_genes = sorted(disease_index[selected_disease]["genes"])
+                candidates = predict_gene_disease_links(
+                    z_norm, node_list, node_to_idx, graph, disease_index, [selected_disease], top_k,
+                )
 
                 if candidates:
                     col_known, col_pred = st.columns(2)
@@ -312,40 +257,49 @@ with tab_disease:
                     with col_known:
                         st.markdown(f"**Already known ({len(known_genes)} genes):**")
                         known_df = pd.DataFrame([
-                            {"Gene": g, "Description": graph.nodes[g].get("name", "") if graph else ""}
-                            for g in sorted(known_genes)
+                            {"Gene": g, "Description": graph.nodes[g].get("name", "")}
+                            for g in known_genes
                         ])
                         st.dataframe(known_df, height=300)
 
                     with col_pred:
-                        st.markdown(f"**AI predictions ({len(candidates)} candidates):**")
-                        st.caption("Higher similarity = stronger prediction")
-                        pred_df = pd.DataFrame(candidates)
-                        pred_df.columns = ["Gene", "Similarity Score", "Description"]
+                        st.markdown(f"**Candidates ({len(candidates)} genes):**")
+                        st.caption("Enrichment = -log10 p that this many of the gene's partners are known disease genes")
+                        pred_df = pd.DataFrame([{
+                            "Gene": c["gene"],
+                            "Enrichment": c["enrichment_score"],
+                            "Known interactors": c["known_interactors"],
+                            "Similarity": c["similarity"],
+                            "Description": c["gene_description"],
+                        } for c in candidates])
                         st.dataframe(pred_df, height=300)
 
-                    # Visualization
+                    # Visualization: known genes that touch the shown candidates first
                     st.subheader("Discovery network")
                     st.caption("Blue = known genes, Orange = predicted candidates. Lines = protein interactions.")
+                    shown_candidates = [c["gene"] for c in candidates[:20]]
+                    touching = [g for g in known_genes
+                                if any(graph.has_edge(g, c) for c in shown_candidates)]
+                    known_shown = (touching + [g for g in known_genes if g not in touching])[:30]
+
                     net = Network(height="500px", width="100%", bgcolor="#0e1117", font_color="white")
                     net.barnes_hut(gravity=-3000)
-
-                    for g in known_genes[:30]:
-                        net.add_node(g, label=g, color="#2a5a8c", size=15,
-                                     title=f"Known: {g}")
+                    for g in known_shown:
+                        net.add_node(g, label=g, color="#2a5a8c", size=15, title=f"Known: {g}")
                     for c in candidates[:20]:
                         net.add_node(c["gene"], label=c["gene"], color="#ff8844", size=12,
-                                     title=f"Predicted: {c['gene']} (score={c['similarity']:.3f})")
+                                     title=f"Predicted: {c['gene']} (enrichment={c['enrichment_score']:.2f}, "
+                                           f"{c['known_interactors']} known interactors)")
 
-                    shown = set(known_genes[:30]) | {c["gene"] for c in candidates[:20]}
-                    if graph:
-                        for u in shown:
-                            for v in shown:
-                                if u < v and graph.has_edge(u, v):
-                                    d = graph.edges[u, v]
-                                    color = "#2a5a8c" if u in known_genes and v in known_genes else "#ff8844"
-                                    net.add_edge(u, v, width=2, color=color,
-                                                 title=f"Confidence: {d.get('score', 'N/A')}")
+                    shown = set(known_shown) | set(shown_candidates)
+                    known_set = set(known_shown)
+                    for u in shown:
+                        for v in shown:
+                            if u < v and graph.has_edge(u, v):
+                                d = graph.edges[u, v]
+                                color = "#2a5a8c" if u in known_set and v in known_set else "#ff8844"
+                                net.add_edge(u, v, width=2, color=color,
+                                             title=f"Confidence: {d.get('score', 'N/A')}")
 
                     with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w") as f:
                         net.save_graph(f.name)
@@ -353,8 +307,8 @@ with tab_disease:
                         components.html(html, height=520, scrolling=True)
                     os.unlink(f.name)
 
-                    # Export
-                    csv = pred_df.to_csv(index=False)
+                    # Export this disease (same columns as the full bundle)
+                    csv = pd.DataFrame(candidates).to_csv(index=False)
                     st.download_button(
                         "📥 Export predictions as CSV",
                         csv,
@@ -497,7 +451,6 @@ st.markdown(
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-disease_index = index_disease_genes(graph, node_list) if graph else {}
 
 if not disease_index:
     st.info("No disease/GWAS data in the network, so there is nothing to export.")

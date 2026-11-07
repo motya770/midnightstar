@@ -20,8 +20,8 @@ from src.utils.discovery_export import (
 def sample_rows():
     links = [{
         "disease": "Asthma", "category": "disease", "gene": "D", "gene_description": "D protein",
-        "similarity": 0.99, "rank": 1, "n_known_genes": 2,
-        "known_interactors": 1, "known_interactor_genes": "B",
+        "enrichment_score": 0.28, "similarity": 0.99, "rank": 1, "n_known_genes": 2,
+        "known_interactors": 1, "degree": 2, "known_interactor_genes": "B",
     }]
     known = [
         {"disease": "Asthma", "category": "disease", "gene": "A", "gwas_score": 0.9},
@@ -54,6 +54,8 @@ def test_build_manifest_records_model_parameters_and_counts():
     assert manifest["counts"] == {"diseases": 1, "predicted_links": 1, "known_links": 2}
     assert set(manifest["files"]) == {PREDICTED_FILE, KNOWN_FILE}
     assert "exported_at" in manifest
+    assert "enrichment" in manifest["method"].lower()
+    assert "enrichment_score" in manifest["files"][PREDICTED_FILE]["columns"]
 
 
 def test_write_discovery_bundle_writes_csvs_manifest_and_readme(tmp_path):
