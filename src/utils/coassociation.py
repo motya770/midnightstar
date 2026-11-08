@@ -30,6 +30,7 @@ from scipy.sparse import csr_matrix, diags
 
 DEFAULT_TOP_TRAITS = 20
 WEIGHTING = "log1p(GWAS score)"
+SUPPORTING_TRAITS_LIMIT = 3
 NAME_STOP_WORDS = frozenset(
     "and of the in to type mellitus disease disorder measurement level levels adjusted for or with "
     "response status count syndrome risk onset age at non".split()
@@ -61,6 +62,51 @@ class CoassociationScores:
     top_traits: int
     exclude_name_sharing: bool
     index: dict = field(repr=False)
+
+    def __post_init__(self):
+        self._column = {d: j for j, d in enumerate(self.diseases)}
+
+    @property
+    def parameters(self) -> dict:
+        """What the manifest records about this scorer."""
+        return {"top_traits": self.top_traits, "weighting": WEIGHTING,
+                "exclude_name_sharing": self.exclude_name_sharing}
+
+    def supporting_traits(self, gene: str, disease: str, limit: int = SUPPORTING_TRAITS_LIMIT) -> list[tuple[str, float]]:
+        """The kept similar traits of ``disease`` that ``gene`` is associated with, as (trait, similarity),
+        strongest contribution (similarity × log1p(score)) first; empty for a gene with none."""
+        column = self._column.get(disease)
+        if column is None:
+            return []
+        contributions = []
+        for trait, similarity in self.similar_traits[column]:
+            score = self.index[trait]["genes"].get(gene)
+            if score is not None:
+                contributions.append((similarity * math.log1p(max(float(score), 0.0)), trait, similarity))
+        contributions.sort(key=lambda c: -c[0])
+        return [(trait, similarity) for _, trait, similarity in contributions[:limit]]
+
+    def similar_trait_rows(self) -> list[dict]:
+        """One row per (disease, kept trait) for the export bundle: disease, trait, similarity, rank (1 = most similar)."""
+        return [
+            {"disease": disease, "trait": trait, "similarity": round(similarity, 4), "rank": rank}
+            for disease, kept in zip(self.diseases, self.similar_traits)
+            for rank, (trait, similarity) in enumerate(kept, start=1)
+        ]
+
+
+def format_supporting_traits(pairs: list[tuple[str, float]]) -> str:
+    """``"Allergic rhinitis (0.62); Eczema (0.34)"``: each trait with its similarity to the disease."""
+    return "; ".join(f"{trait} ({similarity:.2f})" for trait, similarity in pairs)
+
+
+def annotate_supporting_traits(rows: list[dict], scores: CoassociationScores,
+                               limit: int = SUPPORTING_TRAITS_LIMIT) -> list[dict]:
+    """Set ``row["supporting_traits"]`` on every ranking row (from its ``disease`` and ``gene``) and return the list.
+    A row whose disease was not scored gets an empty string."""
+    for row in rows:
+        row["supporting_traits"] = format_supporting_traits(scores.supporting_traits(row["gene"], row["disease"], limit))
+    return rows
 
 
 def _trait_matrix(index: dict[str, dict], node_list, node_to_idx) -> tuple[csr_matrix, list[str]]:

@@ -86,3 +86,27 @@ def test_name_tokens_and_shares_name_token_follow_the_spec_rule():
     assert not shares_name_token("type 2 diabetes mellitus", "glucose measurement")
     assert shares_name_token("asthma", "Asthma severity")
     assert not shares_name_token("coronary artery disease", "Crohn's disease")
+
+
+def test_supporting_traits_lists_the_similar_traits_the_gene_has_in_contribution_order():
+    co = coassociation_scores(make_index(), NODES, IDX, ["Asthma"])
+    assert [t for t, _ in co.supporting_traits("C", "Asthma")] == ["Allergic rhinitis", "Eczema"]
+    assert co.supporting_traits("D", "Asthma") == [("Allergic rhinitis", pytest.approx(0.617, abs=1e-3))]
+    assert [t for t, _ in co.supporting_traits("C", "Asthma", limit=1)] == ["Allergic rhinitis"]
+    assert co.supporting_traits("F", "Asthma") == [] and co.supporting_traits("DIS:1", "Asthma") == []
+
+
+def test_annotate_supporting_traits_formats_up_to_three_traits_per_row():
+    from src.utils.coassociation import SUPPORTING_TRAITS_LIMIT, annotate_supporting_traits, format_supporting_traits
+
+    co = coassociation_scores(make_index(), NODES, IDX, ["Asthma"])
+    rows = [{"disease": "Asthma", "gene": "C"}, {"disease": "Asthma", "gene": "F"}, {"disease": "Other", "gene": "C"}]
+    assert annotate_supporting_traits(rows, co) is rows
+    assert rows[0]["supporting_traits"] == "Allergic rhinitis (0.62); Eczema (0.34)"
+    assert rows[1]["supporting_traits"] == "" and rows[2]["supporting_traits"] == ""
+    assert SUPPORTING_TRAITS_LIMIT == 3 and format_supporting_traits([]) == ""
+    assert co.parameters == {"top_traits": 20, "weighting": "log1p(GWAS score)", "exclude_name_sharing": False}
+    assert co.similar_trait_rows()[:2] == [
+        {"disease": "Asthma", "trait": "Allergic rhinitis", "similarity": pytest.approx(0.6174, abs=1e-4), "rank": 1},
+        {"disease": "Asthma", "trait": "Asthma severity", "similarity": pytest.approx(0.4588, abs=1e-4), "rank": 2},
+    ] and len(co.similar_trait_rows()) == 3
