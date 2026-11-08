@@ -8,10 +8,13 @@ import pandas as pd
 from src.utils.discovery_export import (
     KNOWN_FILE,
     MANIFEST_FILE,
+    NO_PROTEIN_MODEL,
+    PREDICTED_COLUMN_DOCS,
     PREDICTED_COLUMNS,
     PREDICTED_FILE,
     README_FILE,
     build_manifest,
+    render_readme,
     write_discovery_bundle,
     zip_bundle,
 )
@@ -132,3 +135,18 @@ def test_bundle_csv_writes_model_score_column(tmp_path):
     assert list(df.columns) == list(PREDICTED_COLUMNS)
     assert df.columns[-1] == "model_score"
     assert pd.isna(df.loc[0, "model_score"]) and df.loc[1, "model_score"] == 0.7
+
+
+def test_manifest_without_protein_model_says_so():
+    links, known = sample_rows()
+    links[0]["similarity"] = None
+    manifest = build_manifest(
+        model_type=None, metrics={}, checkpoint_path=None, graph_name="full_s800_gwas",
+        n_nodes=7, n_edges=5, embedding_dim=None, categories=["disease"], min_known_genes=2, top_k=50,
+        links=links, known=known,
+    )
+    assert manifest["model"]["type"] == NO_PROTEIN_MODEL == "none"
+    assert "No protein–protein model" in manifest["method"]
+    readme = render_readme(manifest)
+    assert "- Type: none (no protein–protein model loaded)" in readme and "- Test metrics: n/a" in readme
+    assert "empty when no protein" in PREDICTED_COLUMN_DOCS["similarity"]

@@ -31,7 +31,7 @@ PREDICTED_COLUMN_DOCS = {
     "enrichment_score": "Primary ranking score: -log10 hypergeometric p-value that the gene's STRING partners "
                         "contain at least the observed number of known disease genes (0 = no known partner)",
     "similarity": "Cosine similarity between the gene's embedding and the disease signature; "
-                  "breaks ties in enrichment_score only",
+                  "breaks ties in enrichment_score only; empty when no protein–protein model was loaded",
     "rank": "1 = strongest candidate for that disease",
     "n_known_genes": "Number of known disease genes used as the seed set",
     "known_interactors": "How many known disease genes have a STRING interaction with the candidate",
@@ -49,6 +49,11 @@ KNOWN_COLUMN_DOCS = {
 
 ENRICHMENT_SCORER = "enrichment"
 HETERO_SCORER = "hetero-gnn"
+NO_PROTEIN_MODEL = "none"   # manifest model.type when the export was made without a protein–protein model
+NO_PROTEIN_MODEL_TEXT = (
+    " No protein–protein model was loaded for this export, so the similarity column is empty and ties "
+    "in the ranking score keep the network's gene order."
+)
 
 HETERO_METHOD_TEXT = (
     "Candidates are ranked by a heterogeneous graph neural network trained on gene–disease "
@@ -73,14 +78,20 @@ METHOD_TEXT = (
 def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes, n_edges,
                    embedding_dim, categories, min_known_genes, top_k, links, known,
                    scorer: str = ENRICHMENT_SCORER, scorer_checkpoint: str | None = None) -> dict:
-    """``scorer`` names what produced the ranking: "enrichment" (default) or "hetero-gnn"."""
+    """``scorer`` names what produced the ranking: "enrichment" (default) or "hetero-gnn".
+
+    ``model_type=None`` records an export made without a protein–protein model (no embeddings,
+    no similarity tie-break): ``model.type`` becomes ``"none"`` and the method text says so."""
     diseases = {row["disease"] for row in links} | {row["disease"] for row in known}
+    method = HETERO_METHOD_TEXT if scorer == HETERO_SCORER else METHOD_TEXT
+    if model_type is None:
+        method += NO_PROTEIN_MODEL_TEXT
     return {
         "app": "MidnightStar",
         "export": "gene-disease discovery",
         "exported_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         "model": {
-            "type": model_type,
+            "type": model_type or NO_PROTEIN_MODEL,
             "checkpoint_path": checkpoint_path,
             "metrics": dict(metrics),
             "embedding_dim": embedding_dim,
@@ -98,7 +109,7 @@ def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes,
             "predicted_links": len(links),
             "known_links": len(known),
         },
-        "method": HETERO_METHOD_TEXT if scorer == HETERO_SCORER else METHOD_TEXT,
+        "method": method,
         "files": {
             PREDICTED_FILE: {
                 "description": "Predicted (new) gene–disease connections, one row per disease and candidate gene",
@@ -136,7 +147,7 @@ def render_readme(manifest: dict) -> str:
         "",
         "## Model",
         "",
-        f"- Type: {model['type']}",
+        f"- Type: {model['type']}" + (" (no protein–protein model loaded)" if model["type"] == NO_PROTEIN_MODEL else ""),
         f"- Ranking scorer: {manifest.get('scorer', {}).get('name', ENRICHMENT_SCORER)}"
         + (f" ({manifest['scorer']['checkpoint']})" if manifest.get('scorer', {}).get('checkpoint') else ""),
         f"- Test metrics: {metrics}",
