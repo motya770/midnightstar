@@ -64,6 +64,36 @@ def _gene_adjacency(graph, node_list, node_to_idx, gene_mask: np.ndarray) -> csr
     return csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
 
 
+def enrichment_matrix(graph, node_list, node_to_idx, index, diseases) -> np.ndarray:
+    """Guilt-by-association score of every node for every disease, as (n_nodes, n_diseases).
+
+    Entry (i, j) is -log10 of the hypergeometric probability that a gene with node
+    i's degree has at least its observed number of known disease-j genes among its
+    STRING partners (population = gene nodes). Nodes with no known partner score 0.
+    Known genes are scored like any other node; callers mask them out.
+    """
+    n = len(node_list)
+    gene_mask = np.array([graph.nodes[v].get("node_type") == "gene" for v in node_list], dtype=bool)
+    n_genes = int(gene_mask.sum())
+    adjacency = _gene_adjacency(graph, node_list, node_to_idx, gene_mask)
+    degree = np.asarray(adjacency.sum(axis=1)).ravel()
+
+    matrix = np.zeros((n, len(diseases)))
+    for j, disease in enumerate(diseases):
+        known_idx = np.array([node_to_idx[g] for g in index[disease]["genes"] if g in node_to_idx], dtype=int)
+        if known_idx.size == 0:
+            continue
+        indicator = np.zeros(n)
+        indicator[known_idx] = 1.0
+        known_neighbours = adjacency @ indicator
+        hit = known_neighbours > 0
+        if hit.any():
+            log_p = hypergeom.logsf(known_neighbours[hit] - 1, n_genes, len(known_idx), degree[hit])
+            matrix[hit, j] = -log_p / math.log(10)
+    matrix = np.nan_to_num(matrix, nan=0.0, posinf=MAX_ENRICHMENT)
+    return np.minimum(matrix, MAX_ENRICHMENT)
+
+
 def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, diseases,
                                top_k: int, max_listed_interactors: int = 10) -> list[dict]:
     """Rank candidate genes for each disease. One row per (disease, gene).
@@ -75,30 +105,19 @@ def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, dis
     Known genes and non-gene nodes are never returned.
     """
     z_norm = z_norm.detach().cpu()
-    n = len(node_list)
     gene_mask = np.array([graph.nodes[v].get("node_type") == "gene" for v in node_list], dtype=bool)
-    n_genes = int(gene_mask.sum())
     adjacency = _gene_adjacency(graph, node_list, node_to_idx, gene_mask)
     degree = np.asarray(adjacency.sum(axis=1)).ravel()
+    enrichment_all = enrichment_matrix(graph, node_list, node_to_idx, index, diseases)
 
     rows: list[dict] = []
-    for disease in diseases:
+    for j, disease in enumerate(diseases):
         record = index[disease]
         known = [g for g in record["genes"] if g in node_to_idx]
         if not known:
             continue
         known_idx = np.array([node_to_idx[g] for g in known])
-
-        indicator = np.zeros(n)
-        indicator[known_idx] = 1.0
-        known_neighbours = adjacency @ indicator
-        enrichment = np.zeros(n)
-        hit = known_neighbours > 0
-        if hit.any():
-            log_p = hypergeom.logsf(known_neighbours[hit] - 1, n_genes, len(known_idx), degree[hit])
-            enrichment[hit] = -log_p / math.log(10)
-        enrichment = np.nan_to_num(enrichment, nan=0.0, posinf=MAX_ENRICHMENT)
-        enrichment = np.minimum(enrichment, MAX_ENRICHMENT)
+        enrichment = enrichment_all[:, j]
 
         signature = F.normalize(z_norm[torch.from_numpy(known_idx)].mean(dim=0, keepdim=True), dim=-1)
         similarity = (z_norm @ signature.T).squeeze(1).numpy()

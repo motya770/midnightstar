@@ -132,10 +132,38 @@ The Transformer's positional encoding is a randomised estimate; it is
 deterministic for a given graph, but raising **Position encoding accuracy**
 (the number of probes) reduces its noise at the cost of preprocessing time.
 
+### 📏 Held-out disease-gene benchmark
+
+`scripts/benchmark_disease_genes.py` measures how useful a scorer is for
+disease-gene ranking, independently of the protein–protein AUC that training
+reports. For every trait of category *disease* with at least 10 known GWAS
+genes (219 on `full_s800_gwas`), it hides 20 % of the known genes with a fixed
+seed, scores every gene from the remaining 80 %, and reports where the hidden
+genes land among all candidate genes: recall@50, recall@200, median rank and
+MRR (mean over diseases of the reciprocal rank of the best-ranked hidden
+gene). Chance recall@50 is about 0.0025.
+
+```bash
+python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
+    --checkpoint .datasets/trained_models/<run>_checkpoint.pt --json benchmark.json
+```
+
+| Scorer (GNN checkpoint `gnn_20261030_012253`) | recall@50 | recall@200 | median rank | MRR |
+|---|---|---|---|---|
+| Enrichment (production ranking) | 0.042 | 0.083 | 5740 | 0.086 |
+| Centroid cosine, mean-centred embeddings | 0.022 | 0.063 | 5135 | 0.043 |
+| Centroid cosine, raw embeddings | 0.007 | 0.028 | 5580 | 0.012 |
+
+The same machinery is available in code: `src.utils.benchmark.run_benchmark`
+accepts any function with the signature of `predict_gene_disease_links` (it is
+handed the masked index, so it cannot see the hidden genes) or a precomputed
+genes × diseases score matrix, and `make_holdout` returns the split so a model
+can be trained with exactly the same gene–disease pairs held out.
+
 ## 🛠️ Development
 
 ```bash
-pytest                      # 93 tests, CPU only, about 15 s
+pytest                      # 109 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 
@@ -153,7 +181,8 @@ app.py                     Streamlit entry point and navigation
 pages/                     One file per page (download, search, explorer, training, predictions, data browsers)
 src/data/                  Bulk downloaders, SQLite manager, live API clients (GWAS, GTEx, HPA, STRING, AlphaFold, mygene)
 src/models/                GNN, Graph Transformer, Graph VAE, Trainer, Modal app
-src/utils/                 NetworkX -> PyG conversion, graph builder, session helpers, text explainer
+src/utils/                 NetworkX -> PyG conversion, graph builder, discovery scoring and benchmark, session helpers, text explainer
+scripts/                   Command-line tools (held-out disease-gene benchmark)
 tests/                     pytest suite
 docs/                      Graph Transformer tutorial, design specs, write-ups
 lib/                       Vendored JS assets for the network visualisation
