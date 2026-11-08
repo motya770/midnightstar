@@ -61,7 +61,7 @@ if graph is None:
 # ---------------------------------------------------------------------------
 # No model loaded — let user pick one
 # ---------------------------------------------------------------------------
-if results is None:
+if results is None and not session.get_no_protein_model():
     from src.utils.graph_features import nx_to_pyg_data
 
     checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".datasets", "trained_models")
@@ -70,24 +70,6 @@ if results is None:
     checkpoints = sorted(p for p in glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt"))
                          if not is_hetero_checkpoint_path(p))
     training_runs = [r for r in _mgr.list_training_runs() if r.get("model_type") != HETERO_MODEL_TYPE]
-
-    if not checkpoints and not training_runs:
-        st.info(
-            "No trained models found yet. You need to train a model first before you can see predictions."
-        )
-        st.markdown(
-            "Go to **Train Model** to build a network and train an AI model on it. "
-            "This typically takes a few minutes."
-        )
-        st.stop()
-
-    st.subheader("Select a trained model")
-    st.markdown("Choose which model to use for predictions.")
-    hetero_count = len(find_hetero_checkpoints(checkpoint_dir))
-    if hetero_count:
-        st.caption(f"{hetero_count} gene–disease model checkpoint{'s are' if hetero_count > 1 else ' is'} not listed "
-                   "here: load a protein–protein model, then pick it under **Ranking score** in the "
-                   "Predict Disease Genes tab or the export form.")
 
     # Build options list
     options = []
@@ -105,13 +87,15 @@ if results is None:
             option_meta.append(("run", run))
 
     if not options:
-        st.warning("No loadable models found. Please retrain a model.")
-        st.stop()
+        st.info("No loadable protein–protein model found yet. Go to **Train Model** to build a network and train "
+                "one (this typically takes a few minutes), or predict without one below.")
+    else:
+        st.subheader("Select a trained model")
+        st.markdown("Choose which protein–protein model to use for predictions.")
+        selected_idx = st.selectbox("Model", range(len(options)),
+                                    format_func=lambda i: options[i])
 
-    selected_idx = st.selectbox("Model", range(len(options)),
-                                format_func=lambda i: options[i])
-
-    if st.button("Load Model", type="primary"):
+    if options and st.button("Load Model", type="primary"):
         kind, meta = option_meta[selected_idx]
 
         if kind == "checkpoint":
@@ -169,29 +153,63 @@ if results is None:
         session.set_training_results(results)
         st.rerun()
 
+    # Without a protein–protein model: enrichment and the gene–disease model need only the network.
+    st.markdown("**Or predict without a protein–protein model**")
+    hetero_count = len(find_hetero_checkpoints(checkpoint_dir))
+    st.caption(
+        "The Predict Disease Genes tab and the export rank candidates by network enrichment"
+        + (f", or by one of the {hetero_count} gene–disease model checkpoint{'s' if hetero_count > 1 else ''} found,"
+           if hetero_count else "")
+        + " using only the network. Find Similar Genes and Check Gene Pair need a protein–protein model."
+    )
+    if graph is None:
+        st.caption("No saved network found. Go to **Train Model** to build or load one first.")
+    elif st.button("🧬 Predict without a protein model"):
+        session.set_no_protein_model(True)
+        st.rerun()
+
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Model is loaded — compute embeddings
+# Protein model loaded — compute embeddings; or no protein model — the network alone
+# (enrichment and the gene–disease model need no embeddings; z and z_norm stay None)
 # ---------------------------------------------------------------------------
-model = results["model"].cpu()  # training may have left it on MPS/CUDA; features live on CPU
-pyg_data = results["pyg_data"].cpu()
-node_list = results["node_list"]
-node_to_idx = results["node_to_idx"]
-metrics = results["metrics"]
-model_type = results["model_type"]
+if results is not None:
+    model = results["model"].cpu()  # training may have left it on MPS/CUDA; features live on CPU
+    pyg_data = results["pyg_data"].cpu()
+    node_list = results["node_list"]
+    node_to_idx = results["node_to_idx"]
+    metrics = results["metrics"]
+    model_type = results["model_type"]
 
-model.eval()
-with torch.no_grad():
-    z = model.encode(pyg_data)
-    z_norm = F.normalize(z, dim=-1)
+    model.eval()
+    with torch.no_grad():
+        z = model.encode(pyg_data)
+        z_norm = F.normalize(z, dim=-1)
 
-# Model info bar
-st.markdown(
-    f"**Active model:** {model_type} · "
-    f"**Accuracy (AUC):** {metrics['auc_roc']:.4f} · "
-    f"**Genes loaded:** {z.size(0):,}"
-)
+    # Model info bar
+    st.markdown(
+        f"**Active model:** {model_type} · "
+        f"**Accuracy (AUC):** {metrics['auc_roc']:.4f} · "
+        f"**Genes loaded:** {z.size(0):,}"
+    )
+else:
+    if graph is None:
+        st.error("No network data available. Go to **Train Model** to build or load a network first.")
+        st.stop()
+    model = pyg_data = z = z_norm = None
+    node_list = sorted(graph.nodes())
+    node_to_idx = {n: i for i, n in enumerate(node_list)}
+    metrics = {}
+    model_type = None
+    col_bar, col_switch = st.columns([3, 1])
+    col_bar.markdown(
+        "**Active model:** none — ranking by network enrichment or a gene–disease model · "
+        f"**Genes loaded:** {len(node_list):,}"
+    )
+    if col_switch.button("Load a protein–protein model instead"):
+        session.set_no_protein_model(False)
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Helper data
@@ -281,6 +299,11 @@ def find_similar_genes(gene_name, top_k=20):
 # ---------------------------------------------------------------------------
 # Three discovery tabs
 # ---------------------------------------------------------------------------
+NEEDS_PROTEIN_MODEL = (
+    "**{tab}** compares the learned profiles of a protein–protein model, and none is loaded. "
+    "Use **Load a protein–protein model instead** above."
+)
+
 tab_disease, tab_gene, tab_link = st.tabs([
     "🧬 Predict Disease Genes",
     "🔎 Find Similar Genes",
@@ -291,9 +314,10 @@ tab_disease, tab_gene, tab_link = st.tabs([
 with tab_disease:
     st.markdown(
         "**Pick a disease** to rank candidate genes by how strongly their STRING interaction "
-        "partners are enriched for the disease's known genes (guilt-by-association). Ties, "
-        "mostly genes with no known partner, are broken by similarity of the model's learned "
-        "profiles. When a trained gene–disease model is available you can rank by its score "
+        "partners are enriched for the disease's known genes (guilt-by-association). "
+        + ("Ties, mostly genes with no known partner, are broken by similarity of the model's learned "
+           "profiles. " if z_norm is not None else "")
+        + "When a trained gene–disease model is available you can rank by its score "
         "instead. Candidates are hypotheses for follow-up, not a diagnosis."
     )
 
@@ -357,7 +381,7 @@ with tab_disease:
                             **({"Model score": c["model_score"]} if scorer_name == HETERO_SCORER else {}),
                             "Enrichment": c["enrichment_score"],
                             "Known interactors": c["known_interactors"],
-                            "Similarity": c["similarity"],
+                            **({"Similarity": c["similarity"]} if z_norm is not None else {}),
                             "Description": c["gene_description"],
                         } for c in candidates])
                         st.dataframe(pred_df, height=300)
@@ -412,13 +436,16 @@ with tab_disease:
 
 # === Tab 2: Gene Similarity ===
 with tab_gene:
-    st.markdown(
-        "Enter a gene to find others with the most **similar AI-learned profiles**. "
-        "These genes share expression patterns, network neighborhoods, and disease associations — "
-        "they may be involved in the same biological pathways."
-    )
-
-    gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, APOE", key="sim_gene").strip().upper()
+    gene_input = ""
+    if z_norm is None:
+        st.info(NEEDS_PROTEIN_MODEL.format(tab="Find Similar Genes"))
+    else:
+        st.markdown(
+            "Enter a gene to find others with the most **similar AI-learned profiles**. "
+            "These genes share expression patterns, network neighborhoods, and disease associations — "
+            "they may be involved in the same biological pathways."
+        )
+        gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, APOE", key="sim_gene").strip().upper()
 
     if gene_input:
         if gene_input in node_to_idx:
@@ -468,16 +495,19 @@ with tab_gene:
 
 # === Tab 3: Link Prediction ===
 with tab_link:
-    st.markdown(
-        "Check whether two specific genes are predicted to interact. "
-        "The model scores the likelihood based on their learned profiles."
-    )
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        gene_a = st.text_input("First gene", placeholder="e.g., TP53", key="link_a").strip().upper()
-    with col_b:
-        gene_b = st.text_input("Second gene", placeholder="e.g., BRCA1", key="link_b").strip().upper()
+    gene_a = gene_b = ""
+    if z_norm is None:
+        st.info(NEEDS_PROTEIN_MODEL.format(tab="Check Gene Pair"))
+    else:
+        st.markdown(
+            "Check whether two specific genes are predicted to interact. "
+            "The model scores the likelihood based on their learned profiles."
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            gene_a = st.text_input("First gene", placeholder="e.g., TP53", key="link_a").strip().upper()
+        with col_b:
+            gene_b = st.text_input("Second gene", placeholder="e.g., BRCA1", key="link_b").strip().upper()
 
     if gene_a and gene_b:
         if gene_a not in node_to_idx:
@@ -524,7 +554,7 @@ with tab_link:
 # Save / Export
 # ---------------------------------------------------------------------------
 st.divider()
-if st.button("💾 Save Model to Disk"):
+if model is not None and st.button("💾 Save Model to Disk"):
     save_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".models")
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, f"{model_type.lower().replace(' ', '_')}_model.pt")
@@ -539,6 +569,7 @@ st.markdown(
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_model_token = id(model) if model is not None else "no-protein-model"
 
 if not disease_index:
     st.info("No disease/GWAS data in the network, so there is nothing to export.")
@@ -583,11 +614,11 @@ else:
                     manifest = build_manifest(
                         model_type=model_type,
                         metrics=metrics,
-                        checkpoint_path=results.get("checkpoint_path"),
+                        checkpoint_path=results.get("checkpoint_path") if results else None,
                         graph_name=session.get_graph_name(),
-                        n_nodes=pyg_data.num_nodes,
-                        n_edges=pyg_data.edge_index.size(1) // 2,
-                        embedding_dim=z.size(1),
+                        n_nodes=pyg_data.num_nodes if pyg_data is not None else graph.number_of_nodes(),
+                        n_edges=pyg_data.edge_index.size(1) // 2 if pyg_data is not None else graph.number_of_edges(),
+                        embedding_dim=z.size(1) if z is not None else None,
                         categories=exp_categories,
                         min_known_genes=exp_min_genes,
                         top_k=exp_top_k,
@@ -604,7 +635,7 @@ else:
                 st.error(f"Could not write to `{exp_dir}`: {e}")
             else:
                 st.session_state["discovery_export"] = {
-                    "model_token": id(model),
+                    "model_token": _model_token,
                     "dir": str(bundle),
                     "zip": zip_bundle(bundle),
                     "links": links,
@@ -612,7 +643,7 @@ else:
                 }
 
     export = st.session_state.get("discovery_export")
-    if export and export["model_token"] == id(model):
+    if export and export["model_token"] == _model_token:
         counts = export["manifest"]["counts"]
         st.success(
             f"Exported {counts['predicted_links']:,} predicted connections for "
