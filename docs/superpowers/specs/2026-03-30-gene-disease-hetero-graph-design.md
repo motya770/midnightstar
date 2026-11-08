@@ -86,7 +86,7 @@ Hidden size default 128.
 
 - `predict_gene_disease_links(..., scores=None)`: with a (n_nodes × n_diseases) matrix, rank by it, then enrichment, then cosine; each row gains `model_score` (empty when ranking by enrichment). **Existing columns are unchanged; `model_score` is appended.**
 - `build_manifest(..., scorer="enrichment", scorer_checkpoint=None)`: the manifest's `scorer` block and method text name which scorer produced the bundle; the README in the bundle shows it.
-- Results page: when a hetero checkpoint exists in `.datasets/trained_models`, the Predict Disease Genes tab and the export form offer **Ranking score: Network enrichment (default) / Hetero gene–disease model**. The Training page gets no new mode in this revision; training is the CLI.
+- Results page: when a hetero checkpoint exists in `.datasets/trained_models`, the Predict Disease Genes tab and the export form offer **Ranking score: Network enrichment (default) / Hetero gene–disease model**. The Training page offers the model as *Hetero GNN (gene–disease)* (Section 9).
 
 If the model does not beat enrichment, enrichment stays the default: the Results page still offers the
 checkpoint, but under a label marked *experimental, below enrichment on the benchmark*, and the combination
@@ -114,6 +114,8 @@ scorers stay in the CLI and the benchmark only (Section 8 records the outcome).
 | `src/models/hetero_trainer.py` | `HeteroTrainer`, `HeteroTrainConfig` |
 | `src/utils/hetero_scorer.py` | checkpoint loading and score matrices |
 | `scripts/train_hetero_disease_model.py` | training CLI |
+| `src/models/hetero_pipeline.py` | the pipeline shared by the CLI, the Training page and Modal (Section 9) |
+| `pages/3_Model_Training.py`, `src/models/modal_app.py` | Hetero GNN training mode, CPU / MPS / Modal GPU (Section 9) |
 | `scripts/benchmark_disease_genes.py` | hetero and combination scorers, hub concentration |
 | `src/utils/benchmark.py` | combination helpers, hub concentration |
 | `src/utils/discovery.py`, `src/utils/discovery_export.py`, `pages/4_Results.py` | optional model scorer, appended column, manifest scorer |
@@ -160,3 +162,44 @@ validation MRR 0.008 and validation recall@50 0.026 when training was stopped
 at the user's request; no checkpoint was saved from it. The README's training
 command reproduces that run. Degree-aware negatives and the bilinear/MLP
 decoders were implemented but not evaluated at full size.
+
+## Section 9: Training-page mode (2026-11-08)
+
+The Model Training page offers the model as a fourth choice, **Hetero GNN
+(gene–disease)**, next to GNN, Graph Transformer and VAE. It runs the same
+pipeline as the CLI, which now lives in `src/models/hetero_pipeline.py`
+(`prepare_hetero_training` → `train_hetero` → `benchmark_hetero` →
+`save_hetero_run`); the CLI, the page and the Modal remote function all call
+it, so a checkpoint from the page is what the CLI would have written.
+
+- **Settings.** Hidden dimension (32–256, default 128), layers (1–3), decoder
+  (dot / bilinear / mlp), dropout, minimum genes per trait, gene- and
+  trait-corrupted negatives per known pair, negative sampling (uniform /
+  degree); epochs up to 2000 (default 300), learning rate, early stopping,
+  seed; a *hold out benchmark pairs* checkbox (default on: the Section 5
+  protocol, 20 % of each disease's known genes, benchmarked against
+  enrichment), the validation share, validate-every-N and patience. The
+  protein–protein edge split under Network Summary does not apply and the page
+  says so.
+- **Where to train.** This computer's CPU, the Mac's GPU (MPS; the caption
+  notes the CPU was faster for this model in our runs) or a Modal cloud GPU
+  (T4 / A10G / A100 through `train_hetero_on_gpu` / `train_hetero_on_a10g` /
+  `train_hetero_on_a100`). The remote function receives a pickled payload
+  (the bundle with hidden pairs removed, the trait index, the split, model
+  kwargs, config) and returns weights, history and metrics; the benchmark and
+  the save run locally, so a cloud run leaves exactly what a local run leaves.
+  The Modal image gains `tqdm` and `scipy`.
+- **Refusals before training.** A network without GWAS associations, a
+  network where no disease keeps 10+ known genes while the hold-out is on, or
+  a minimum-genes setting that drops every association: each message names
+  the fix (rebuild with GWAS, untick the hold-out or build a larger network,
+  lower the setting).
+- **Shown after training.** Validation MRR, recall@50 and AUC with the best
+  round, the loss / validation-MRR curve, the benchmark table (enrichment, the
+  model and the three combinations: recall@50, recall@200, median rank, MRR)
+  with a one-line verdict against enrichment, the checkpoint path and run
+  number, and a link to the Predictions page, where the checkpoint appears
+  under *Ranking score*. The run is recorded with `model_type = "Hetero GNN"`
+  (AUC column = validation AUC, precision column = benchmark recall@50). The
+  page does not set `training_results`: the Predictions page would treat the
+  model as a protein–protein model.

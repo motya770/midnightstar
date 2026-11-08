@@ -83,9 +83,13 @@ cannot produce an empty test split.
 | GNN (default) | GraphSAGE layers | Fast; good baseline |
 | Graph Transformer | Pre-norm `TransformerConv` blocks with feed-forward paths | Uses the STRING evidence channels as edge features, optional random-walk positional encoding (RWSE), AdamW with warmup |
 | Graph VAE | GraphSAGE encoder with a Gaussian latent space | KL-regularised; useful for similarity search |
+| Hetero GNN (gene–disease) | HeteroConv/SAGE over genes **and** GWAS traits | Scores (gene, disease) pairs directly; benchmarked against network enrichment; see the hetero section below |
 
-All three score a pair as the dot product of the two node embeddings and are
-trained with binary cross-entropy on logits.
+The three protein–protein models score a pair as the dot product of the two
+node embeddings and are trained with binary cross-entropy on logits. The
+Hetero GNN has its own settings (decoder, negatives, minimum genes per trait,
+benchmark hold-out) and its own results panel; it runs on the CPU, the Mac's
+GPU or a Modal GPU like the others.
 
 **Training controls.** Epochs, learning rate, early stopping (restores the
 best-validation weights), random seed (same seed means the same split,
@@ -203,6 +207,14 @@ python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
     --hetero-checkpoint .datasets/trained_models/hetero_gnn_<stamp>_checkpoint.pt
 ```
 
+The **Train Model** page offers the same pipeline as *Hetero GNN (gene–disease)*:
+pick a network, set the model and hold-out options, and train on this
+computer's CPU, the Mac's GPU or a Modal cloud GPU (T4, A10G or A100). The
+page shows the validation metrics, the benchmark table against enrichment,
+the checkpoint path and the run number; the checkpoint then appears on the
+Predictions page under *Ranking score*. The CLI and the page share
+`src/models/hetero_pipeline.py`, so they produce the same checkpoint.
+
 Training is full-batch (one optimizer step per epoch, about a second on CPU at
 full size; Apple MPS was several times slower for this model), validates on a
 second seeded hold-out of known disease genes scored the benchmark way, and
@@ -223,7 +235,7 @@ when enrichment ranked); the existing columns are unchanged.
 ## 🛠️ Development
 
 ```bash
-pytest                      # 162 tests, CPU only, about 15 s
+pytest                      # 174 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 
