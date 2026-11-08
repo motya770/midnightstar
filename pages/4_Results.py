@@ -25,7 +25,15 @@ from src.utils.discovery_export import (
     write_discovery_bundle,
     zip_bundle,
 )
-from src.utils.hetero_scorer import find_hetero_checkpoints, hetero_score_matrix, load_hetero_checkpoint
+from src.utils.hetero_scorer import (
+    HETERO_MODEL_CLASS,
+    HETERO_MODEL_TYPE,
+    find_hetero_checkpoints,
+    hetero_encode,
+    is_hetero_checkpoint_path,
+    load_hetero_checkpoint,
+    score_from_encoding,
+)
 from src.models.gnn import GNNLinkPredictor
 from src.models.graph_transformer import GraphTransformerLinkPredictor
 from src.models.vae import GraphVAE
@@ -57,8 +65,11 @@ if results is None:
     from src.utils.graph_features import nx_to_pyg_data
 
     checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".datasets", "trained_models")
-    checkpoints = sorted(glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt")))
-    training_runs = _mgr.list_training_runs()
+    # Gene–disease (hetero) checkpoints rank diseases under "Ranking score" below; they are not
+    # protein–protein models and cannot be loaded here.
+    checkpoints = sorted(p for p in glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt"))
+                         if not is_hetero_checkpoint_path(p))
+    training_runs = [r for r in _mgr.list_training_runs() if r.get("model_type") != HETERO_MODEL_TYPE]
 
     if not checkpoints and not training_runs:
         st.info(
@@ -102,6 +113,12 @@ if results is None:
             checkpoint = torch.load(meta, map_location="cpu", weights_only=False)
             model_class = checkpoint["model_class"]
             model_kwargs = checkpoint["model_kwargs"]
+            if model_class == HETERO_MODEL_CLASS:
+                st.error("This is a gene–disease model checkpoint, not a protein–protein model. Load a "
+                         "protein–protein model here and choose the gene–disease model under **Ranking score** "
+                         "in the Predict Disease Genes tab (it is listed there when the file is named "
+                         "`hetero_gnn_<stamp>_checkpoint.pt`).")
+                st.stop()
 
             # Load graph for this checkpoint
             graph_name = checkpoint.get("graph_name", "")
@@ -202,22 +219,28 @@ SCORER_HELP = (
 )
 
 
-@st.cache_resource(show_spinner="Scoring with the gene–disease model...")
-def _hetero_scores(checkpoint_path, graph_token, diseases_key, _graph):
-    checkpoint = load_hetero_checkpoint(checkpoint_path)
-    return hetero_score_matrix(checkpoint, _graph, list(diseases_key))
+@st.cache_resource(show_spinner="Encoding the network with the gene–disease model...")
+def _hetero_encoding(checkpoint_path, graph_token, _graph):
+    """One graph conversion and forward pass per (checkpoint, network); every disease list is scored from it."""
+    return hetero_encode(load_hetero_checkpoint(checkpoint_path), _graph)
 
 
 def scorer_for(label, diseases):
-    """(score matrix or None, scorer name for the manifest, checkpoint path or None)."""
+    """(score matrix or None, scorer name for the manifest, checkpoint path or None).
+
+    When the checkpoint cannot score this network (different traits or gene features, unreadable
+    file), the ranking falls back to network enrichment with a visible warning, and the manifest
+    records enrichment."""
     if label == SCORER_ENRICHMENT_LABEL or label not in _scorer_paths:
         return None, ENRICHMENT_SCORER, None
     path = _scorer_paths[label]
     try:
-        matrix = _hetero_scores(path, session.get_graph_token(), tuple(diseases), graph)
-    except ValueError as e:
-        st.error(f"The gene–disease checkpoint does not match this network: {e}")
-        st.stop()
+        encoding = _hetero_encoding(path, session.get_graph_token(), graph)
+        matrix = score_from_encoding(encoding, list(diseases))
+    except (ValueError, RuntimeError, KeyError) as e:
+        st.warning("The gene–disease checkpoint cannot score this network, so this ranking uses network "
+                   f"enrichment instead. {str(e)[:300]}")
+        return None, ENRICHMENT_SCORER, None
     return matrix, HETERO_SCORER, path
 
 

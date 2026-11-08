@@ -1,5 +1,6 @@
 # tests/models/test_hetero_trainer.py
 import copy
+import math
 
 import networkx as nx
 import torch
@@ -87,6 +88,7 @@ def test_negatives_never_coincide_with_known_edges():
 
 
 def test_negative_sampling_survives_a_dense_graph():
+    """Every gene is a known gene of the only trait, so every gene-corrupted negative is filtered out."""
     G = nx.Graph()
     for i in range(12):
         G.add_node(f"G{i}", node_type="gene", expression={"liver": 1.0},
@@ -94,12 +96,15 @@ def test_negative_sampling_survives_a_dense_graph():
     G.add_edges_from([(f"G{i}", f"G{i+1}") for i in range(11)])
     node_list = sorted(G.nodes())
     index = index_disease_genes(G, node_list)
-    split = make_holdout(index)
-    bundle = nx_to_hetero_data(G, exclude_pairs={(g, d) for d, genes in split.hidden.items() for g in genes})
+    bundle = nx_to_hetero_data(G)          # no benchmark hold-out: hidden genes would survive as negatives
     model = HeteroGNNLinkPredictor(gene_in=bundle.data["gene"].x.size(1), num_traits=1, hidden_channels=8)
     trainer = HeteroTrainer(model, HeteroTrainConfig(epochs=2, neg_trait=0))
-    history = trainer.train(bundle, index, split, G)   # all gene-corrupted negatives collide with known edges
+    trainer._setup(bundle, index, None, G)
+    neg_gene, neg_trait = trainer._sample_negatives(trainer._train_edges)
+    assert neg_gene.numel() == 0 and neg_trait.numel() == 0
+    history = trainer.train(bundle, index, None, G)
     assert len(history["train_loss"]) == 2
+    assert all(math.isfinite(loss) for loss in history["train_loss"])
 
 
 def test_early_stopping_restores_best_weights():

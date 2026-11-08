@@ -13,18 +13,22 @@ from src.utils.hetero_scorer import (
     HETERO_MODEL_CLASS,
     HETERO_MODEL_TYPE,
     find_hetero_checkpoints,
+    hetero_encode,
     hetero_score_matrix,
+    is_hetero_checkpoint_path,
     load_hetero_checkpoint,
     save_hetero_checkpoint,
+    score_from_encoding,
 )
 
 GENES = [f"G{i:02d}" for i in range(24)]
 
 
-def make_graph(extra_trait=False):
+def make_graph(extra_trait=False, extra_tissue=False):
     G = nx.Graph()
+    expression = {"liver": 1.0, "brain": 0.5} if extra_tissue else {"liver": 1.0}
     for g in GENES:
-        G.add_node(g, node_type="gene", expression={"liver": 1.0})
+        G.add_node(g, node_type="gene", expression=dict(expression))
     G.add_edges_from([(GENES[i], GENES[(i + 1) % 24]) for i in range(24)])
     for g in GENES[:12]:
         G.nodes[g].setdefault("gwas", {}).setdefault("disease", []).append({"trait": "Asthma", "score": 0.9})
@@ -111,3 +115,30 @@ def test_find_hetero_checkpoints_lists_only_hetero_files(tmp_path):
         "hetero_gnn_20261108_000000_checkpoint.pt", "hetero_gnn_20261108_000001_checkpoint.pt",
     ]
     assert find_hetero_checkpoints(tmp_path / "missing") == []
+
+
+def test_feature_width_mismatch_raises_value_error(tmp_path):
+    """A graph with a different gene-feature layout must be refused, not crash inside encode (RuntimeError)."""
+    _, _, _, _, _, path = train_and_save(tmp_path)
+    checkpoint = load_hetero_checkpoint(path)
+    with pytest.raises(ValueError, match="feature"):
+        hetero_score_matrix(checkpoint, make_graph(extra_tissue=True), ["Asthma"])
+
+
+def test_encoding_is_reusable_across_disease_lists(tmp_path):
+    """Encode once per graph, score any disease list from it: same numbers as hetero_score_matrix."""
+    G, _, split, bundle, _, path = train_and_save(tmp_path)
+    checkpoint = load_hetero_checkpoint(path)
+    encoding = hetero_encode(checkpoint, G, honest=True)
+    assert np.allclose(score_from_encoding(encoding, split.diseases),
+                       hetero_score_matrix(checkpoint, G, split.diseases, honest=True))
+    with pytest.warns(UserWarning, match="Nonexistent"):
+        matrix = score_from_encoding(encoding, ["Asthma", "Nonexistent"])
+    assert matrix.shape == (len(bundle.node_list), 2)
+    assert np.all(matrix[:, 1] == 0) and np.any(matrix[:, 0] != 0)
+
+
+def test_is_hetero_checkpoint_path_matches_only_the_naming_pattern():
+    assert is_hetero_checkpoint_path("/models/hetero_gnn_20261108_013654_checkpoint.pt")
+    assert not is_hetero_checkpoint_path("/models/gnn_20261030_012253_checkpoint.pt")
+    assert not is_hetero_checkpoint_path("/models/hetero_gnn_notes.txt")
