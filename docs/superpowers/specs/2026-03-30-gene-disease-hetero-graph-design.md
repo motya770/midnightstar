@@ -87,6 +87,7 @@ Hidden size default 128.
 - `predict_gene_disease_links(..., scores=None)`: with a (n_nodes × n_diseases) matrix, rank by it, then enrichment, then cosine; each row gains `model_score` (empty when ranking by enrichment). **Existing columns are unchanged; `model_score` is appended.**
 - `build_manifest(..., scorer="enrichment", scorer_checkpoint=None)`: the manifest's `scorer` block and method text name which scorer produced the bundle; the README in the bundle shows it.
 - Results page: when a hetero checkpoint exists in `.datasets/trained_models`, the Predict Disease Genes tab and the export form offer **Ranking score: Network enrichment (default) / Hetero gene–disease model**. The Training page offers the model as *Hetero GNN (gene–disease)* (Section 9).
+- Results page without a protein–protein model (added 2026-11-08): *Predict without a protein model*, offered next to *Load Model*, runs the Predict Disease Genes tab and the export on the network alone (enrichment or the gene–disease model; `predict_gene_disease_links(z_norm=None)` has no similarity tie-break and leaves `similarity` empty; `build_manifest(model_type=None)` records `model.type = "none"`). Find Similar Genes and Check Gene Pair show a notice instead. The choice is a session flag (`session.get_no_protein_model`); hetero models still never enter `training_results`.
 
 If the model does not beat enrichment, enrichment stays the default: the Results page still offers the
 checkpoint, but under a label marked *experimental, below enrichment on the benchmark*, and the combination

@@ -232,6 +232,14 @@ beats enrichment. The export's `manifest.json` names the scorer that produced
 the bundle, and the predicted links gain a trailing `model_score` column (empty
 when enrichment ranked); the existing columns are unchanged.
 
+The Predictions page no longer needs a protein–protein model: **Predict without
+a protein model** (offered next to *Load Model*) ranks disease genes by network
+enrichment or a gene–disease model and exports them with only the network
+loaded. Without a protein model there is no similarity tie-break (the export's
+`similarity` column is empty and the manifest records `model.type = "none"`),
+and the Find Similar Genes and Check Gene Pair tabs, which compare learned
+protein profiles, say so instead of running.
+
 ## 🛠️ Development
 
 ```bash
