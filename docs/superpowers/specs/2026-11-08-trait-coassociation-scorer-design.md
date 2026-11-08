@@ -62,10 +62,10 @@ Enrichment stays the default ranking (author's call: switching the default is a 
 | scorer | recall@50 | recall@200 | median rank | MRR | distinct top-10 | max rank-1 |
 |---|---|---|---|---|---|---|
 | enrichment | 0.0415 | 0.0827 | 10586 | 0.0854 | 1480 | 6 |
-| trait co-association (log1p weights, 20 traits) | 0.2602 | 0.4033 | 681 | 0.4769 | 1235 | 7 |
-| trait co-association, strict | 0.1930 | 0.2976 | 2411 | 0.3803 | 1187 | 9 |
+| trait co-association (log1p weights, 20 traits) | 0.2602 | 0.4033 | 681 | 0.4792 | 1234 | 7 |
+| trait co-association, strict | 0.1930 | 0.2976 | 2411 | 0.3804 | 1186 | 9 |
 
-(The README's enrichment median rank of 5740 was measured with the similarity tie-break of a protein checkpoint; without embeddings ties get average ranks.)
+(Numbers from `scripts/benchmark_disease_genes.py --scorers enrichment,coassociation,coassociation-strict` on the shipped implementation. The README's enrichment median rank of 5740 was measured with the similarity tie-break of a protein checkpoint; without embeddings ties get average ranks.)
 
 ## Where it lives
 

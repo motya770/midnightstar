@@ -125,7 +125,12 @@ interaction partners, with cosine similarity of the learned embeddings to the
 known genes' mean embedding breaking ties. In a held-out check that hides 20 %
 of each trait's known genes, this recovers them about six times more often
 than ranking by embedding similarity alone, which mostly surfaces hub genes.
-It is a network heuristic, not a supervised disease classifier. The **Export
+The *Ranking score* selector also offers **trait co-association**, which ranks
+by the gene's GWAS associations with the traits most similar to the disease,
+needs no network and no model, and recovers about six times more hidden genes
+than enrichment on the benchmark below (see there for the caveat on alias
+traits); each candidate lists the traits behind its score.
+Enrichment is a network heuristic, not a supervised disease classifier. The **Export
 discoveries** section at the bottom of the page writes the full ranking for
 every trait as a CSV bundle with a manifest, ready to hand to Claude Science
 or any other tool. A heterogeneous gene–disease graph that trains on disease
@@ -155,10 +160,12 @@ python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
 | Scorer | recall@50 | recall@200 | median rank | MRR | distinct genes in top-10 | max rank-1 |
 |---|---|---|---|---|---|---|
 | Enrichment (production ranking) | 0.042 | 0.083 | 5740 | 0.086 | 1470 | 6 |
+| Trait co-association (`coassociation`) | **0.260** | **0.403** | 681 | **0.479** | 1234 | 7 |
+| Trait co-association, strict (`coassociation-strict`) | 0.193 | 0.298 | 2411 | 0.380 | 1186 | 9 |
 | Centroid cosine, mean-centred embeddings (`gnn_20261030_012253`) | 0.022 | 0.063 | 5135 | 0.043 | 662 | 13 |
 | Centroid cosine, raw embeddings (`gnn_20261030_012253`) | 0.007 | 0.028 | 5580 | 0.012 | 287 | 34 |
 | Hetero gene–disease model alone (`hetero_gnn_20261108_013654`) | 0.002 | 0.011 | 4252 | 0.003 | 982 | 10 |
-| Enrichment + hetero model, z-score sum (`hetero+enrichment-z`) | **0.046** | **0.092** | 4264 | **0.094** | 1457 | 7 |
+| Enrichment + hetero model, z-score sum (`hetero+enrichment-z`) | 0.046 | 0.092 | 4264 | 0.094 | 1457 | 7 |
 | Enrichment + hetero model, rank average (`hetero+enrichment`) | 0.035 | 0.085 | 4204 | 0.057 | 1349 | 3 |
 | Enrichment, hetero model for unscored genes (`enrichment>hetero`) | 0.042 | 0.083 | 4794 | 0.086 | 1480 | 6 |
 
@@ -170,6 +177,21 @@ cosine rows: the protein–protein checkpoint takes GWAS trait tokens as input
 features and is encoded on the full graph, so those embeddings have seen the
 hidden associations; the cosine baselines are optimistic and still lose.
 Enrichment and the hetero model only see the visible associations.
+
+**Trait co-association** (added 2026-11-08) does not use the network at all:
+it finds the 20 GWAS traits whose gene sets are most similar to the disease
+(cosine similarity of the log1p-weighted gene × trait columns, the disease's
+own column excluded) and scores each gene by the similarity-weighted sum of
+its associations with those traits, with enrichment breaking ties. It
+recovers six times as many hidden genes in the top 50 as enrichment, with no
+hub genes. Part of the gain comes from GWAS Catalog alias traits ("diabetes
+mellitus" next to "type 2 diabetes mellitus"): the strict row drops every
+trait that shares a word with the disease name and still recovers 19 %.
+Adding STRING signals to co-association (smoothing over partners, z-score
+sums or rank averages with enrichment) did not improve on it. Both rows were
+measured without embeddings, so genes tied on both scores share their average
+rank; the design is in
+`docs/superpowers/specs/2026-11-08-trait-coassociation-scorer-design.md`.
 
 The heterogeneous model's checkpoint (dot decoder, learning rate 1e-3,
 early-stopped at epoch 42 with 1 optimizer step per epoch, so undertrained)
@@ -224,20 +246,27 @@ traits with few genes; `--no-holdout` skips the benchmark hold-out for a
 production model once the honest one has been validated (a 10 % validation
 hold-out of disease genes still drives early stopping).
 
-When a hetero checkpoint exists in `.datasets/trained_models`, the Predictions
-page offers **Ranking score: Network enrichment (default) / Enrichment +
-gene–disease model / Gene–disease model** in the Predict Disease Genes tab and
-the export form. The blend is the benchmark's `hetero+enrichment-z` (the sum of
+The Predictions page offers **Ranking score: Network enrichment (default) /
+Trait co-association / Trait co-association, strict** in the Predict Disease
+Genes tab and the export form and, when a hetero checkpoint exists in
+`.datasets/trained_models`, **Enrichment + gene–disease model / Gene–disease
+model** as well. Trait co-association shows the traits behind each candidate
+(*Supporting traits*) and lists the disease's 20 most similar traits; the
+strict variant excludes traits that share a word with the disease name. The
+blend is the benchmark's `hetero+enrichment-z` (the sum of
 the per-disease z-scores of enrichment and the model's logit, each over all
 nodes of the network); across the checkpoints tried it recovered about as many
 hidden disease genes in the top 50 as enrichment alone or somewhat more (−2 % to
 +16 %), with mixed recall@200. The model alone is labelled
 *experimental, below enrichment on the benchmark*: it recovers far fewer hidden
 genes and a few genes dominate its top ranks. The export's `manifest.json`
-names the scorer that produced the bundle (`enrichment`,
-`hetero-gnn+enrichment-z` or `hetero-gnn`), and the predicted links gain a
-trailing `model_score` column holding that scorer's score (empty when
-enrichment ranked); the existing columns are unchanged.
+names the scorer that produced the bundle (`enrichment`, `trait-coassociation`,
+`trait-coassociation-strict`, `hetero-gnn+enrichment-z` or `hetero-gnn`) and,
+for the co-association scorers, its parameters; the predicted links gain
+trailing `model_score` and `supporting_traits` columns (empty when enrichment
+ranked), a co-association bundle adds `similar_traits.csv` (each disease's 20
+most similar traits with their similarity), and the existing columns are
+unchanged.
 
 The Predictions page no longer needs a protein–protein model: **Predict without
 a protein model** (offered next to *Load Model*) ranks disease genes by network
@@ -250,7 +279,7 @@ protein profiles, say so instead of running.
 ## 🛠️ Development
 
 ```bash
-pytest                      # 184 tests, CPU only, about 15 s
+pytest                      # 196 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 
