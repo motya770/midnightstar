@@ -4,10 +4,13 @@ Pure functions over the NetworkX graph and, when a protein–protein model is
 loaded, its node embeddings. Used by the Results page and its export so the
 logic can be tested without Streamlit.
 
-Candidates for a disease are ranked by guilt-by-association on the STRING
-network: the hypergeometric enrichment of known disease genes among a gene's
-interaction partners. Embedding similarity to the disease signature only breaks
-ties, which matters mostly for genes with no known interactor.
+Without ``scores``, ``predict_gene_disease_links`` ranks candidates by
+guilt-by-association on the STRING network: the hypergeometric enrichment of
+known disease genes among a gene's interaction partners. Embedding similarity
+to the disease signature only breaks ties, which matters mostly for genes with
+no known interactor. The Predictions page ranks by trait co-association by
+default (``src/utils/coassociation.py``) and passes its matrix as ``scores``;
+enrichment and then similarity break ties.
 """
 import math
 

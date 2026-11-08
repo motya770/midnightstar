@@ -119,18 +119,20 @@ page can reload any checkpoint.
 ## 🔍 Interpreting predictions
 
 The training objective is protein–protein link prediction on the STRING
-network. The **Predict Disease Genes** tab ranks genes by guilt-by-association:
-the hypergeometric enrichment of the trait's known genes among a gene's STRING
-interaction partners, with cosine similarity of the learned embeddings to the
-known genes' mean embedding breaking ties. In a held-out check that hides 20 %
-of each trait's known genes, this recovers them about six times more often
-than ranking by embedding similarity alone, which mostly surfaces hub genes.
-The *Ranking score* selector also offers **trait co-association**, which ranks
-by the gene's GWAS associations with the traits most similar to the disease,
-needs no network and no model, and recovers about six times more hidden genes
-than enrichment on the benchmark below (see there for the caveat on alias
-traits); each candidate lists the traits behind its score.
-Enrichment is a network heuristic, not a supervised disease classifier. The **Export
+network. The **Predict Disease Genes** tab ranks genes by **trait
+co-association** by default: the gene's GWAS associations with the 20 traits
+whose gene sets are most similar to the disease, weighted by that similarity.
+It needs no network and no model, lists the traits behind each candidate, and
+in a held-out check that hides 20 % of each trait's known genes it recovers
+them six times more often than **network enrichment** (the hypergeometric
+enrichment of the trait's known genes among a gene's STRING partners, the
+default until 2026-11-08 and still offered under *Ranking score*; see the
+benchmark below for the caveat on alias traits), which in turn recovers them
+about six times more often than ranking by embedding similarity alone, the
+hub-prone method the app started with. Enrichment breaks ties in the
+co-association ranking, and cosine similarity of the learned embeddings breaks
+the remaining ones when a protein–protein model is loaded. Both are
+heuristics, not supervised disease classifiers. The **Export
 discoveries** section at the bottom of the page writes the full ranking for
 every trait as a CSV bundle with a manifest, ready to hand to Claude Science
 or any other tool. A heterogeneous gene–disease graph that trains on disease
@@ -159,9 +161,9 @@ python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
 
 | Scorer | recall@50 | recall@200 | median rank | MRR | distinct genes in top-10 | max rank-1 |
 |---|---|---|---|---|---|---|
-| Enrichment (production ranking) | 0.042 | 0.083 | 5740 | 0.086 | 1470 | 6 |
+| Enrichment (the default ranking until 2026-11-08) | 0.042 | 0.083 | 5740 | 0.086 | 1470 | 6 |
 | Enrichment without a protein model (no similarity tie-break, ties averaged) | 0.042 | 0.083 | 10586 | 0.085 | 1480 | 6 |
-| Trait co-association (`coassociation`) | **0.260** | **0.403** | 681 | **0.479** | 1234 | 7 |
+| Trait co-association (`coassociation`, the production default) | **0.260** | **0.403** | 681 | **0.479** | 1234 | 7 |
 | Trait co-association, strict (`coassociation-strict`) | 0.193 | 0.298 | 2411 | 0.380 | 1186 | 9 |
 | Centroid cosine, mean-centred embeddings (`gnn_20261030_012253`) | 0.022 | 0.063 | 5135 | 0.043 | 662 | 13 |
 | Centroid cosine, raw embeddings (`gnn_20261030_012253`) | 0.007 | 0.028 | 5580 | 0.012 | 287 | 34 |
@@ -198,8 +200,8 @@ co-association rows with it; the design is in
 
 The heterogeneous model's checkpoint (dot decoder, learning rate 1e-3,
 early-stopped at epoch 42 with 1 optimizer step per epoch, so undertrained)
-does not beat enrichment on its own, and **enrichment stays the default
-ranking**. Summed as z-scores with enrichment it lifts every metric
+does not beat enrichment on its own (and **enrichment stayed the default
+ranking** until trait co-association replaced it on 2026-11-08). Summed as z-scores with enrichment it lifts every metric
 (recall@50 0.042 → 0.046, MRR 0.086 → 0.094), so the combination is worth
 revisiting once a longer-trained checkpoint exists; the training command below
 reproduces the run that was stopped at epoch 283 of 1500 (loss 0.37, falling).
@@ -249,11 +251,13 @@ traits with few genes; `--no-holdout` skips the benchmark hold-out for a
 production model once the honest one has been validated (a 10 % validation
 hold-out of disease genes still drives early stopping).
 
-The Predictions page offers **Ranking score: Network enrichment (default) /
-Trait co-association / Trait co-association, strict** in the Predict Disease
+The Predictions page offers **Ranking score: Trait co-association (default) /
+Trait co-association, strict / Network enrichment** in the Predict Disease
 Genes tab and the export form and, when a hetero checkpoint exists in
 `.datasets/trained_models`, **Enrichment + gene–disease model / Gene–disease
-model** as well. Trait co-association shows the traits behind each candidate
+model** as well. Trait co-association became the default on 2026-11-08;
+enrichment remains the STRING-only alternative and the fallback when a
+checkpoint cannot score the network. Trait co-association shows the traits behind each candidate
 (*Supporting traits*) and lists the disease's 20 most similar traits; the
 strict variant excludes traits that share a word with the disease name. The
 blend is the benchmark's `hetero+enrichment-z` (the sum of

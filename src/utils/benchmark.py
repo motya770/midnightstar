@@ -328,9 +328,10 @@ def reference_scorers(names, graph, node_list, node_to_idx, index: dict[str, dic
                       z=None, hetero_scores=None) -> dict[str, BenchmarkResult]:
     """Benchmark the named scorers.
 
-    ``enrichment`` is the production ranking; ``coassociation`` / ``coassociation-strict``
+    ``coassociation`` (the Predictions page's default ranking) and ``coassociation-strict``
     are trait co-association over the masked index with enrichment breaking ties (no model
-    needed); ``cosine`` / ``centred-cosine`` need the protein–protein embeddings ``z``;
+    needed); ``enrichment`` is the STRING-only ranking (the default until 2026-11-08);
+    ``cosine`` / ``centred-cosine`` need the protein–protein embeddings ``z``;
     ``hetero`` and its combinations with enrichment (rank average, z-score sum, enrichment
     with the model as fallback for genes with no known partner) need the hetero model's
     ``hetero_scores`` matrix.
@@ -358,7 +359,7 @@ def reference_scorers(names, graph, node_list, node_to_idx, index: dict[str, dic
     for name in names:
         if name == "enrichment":
             if z is not None:
-                # the production path: enrichment with cosine similarity breaking ties
+                # enrichment as the page ranks it with a protein model loaded: cosine similarity breaks ties
                 z_norm = F.normalize(z.detach().cpu().float(), dim=-1)
                 results[name] = run_benchmark(predict_gene_disease_links, graph, node_list, node_to_idx, index,
                                               split, z_norm=z_norm)

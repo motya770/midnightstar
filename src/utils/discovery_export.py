@@ -171,7 +171,7 @@ def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes,
                    embedding_dim, categories, min_known_genes, top_k, links, known,
                    scorer: str = ENRICHMENT_SCORER, scorer_checkpoint: str | None = None,
                    scorer_parameters: dict | None = None, similar_traits: list[dict] | None = None) -> dict:
-    """``scorer`` names what produced the ranking: "enrichment" (default), "hetero-gnn",
+    """``scorer`` names what produced the ranking: "enrichment" (the parameter's default), "hetero-gnn",
     "hetero-gnn+enrichment-z", "trait-coassociation" or "trait-coassociation-strict".
 
     ``scorer_parameters`` (the co-association scorers' ``top_traits``, ``weighting`` and

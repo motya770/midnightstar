@@ -165,7 +165,8 @@ if results is None and not session.get_no_protein_model():
                    else ", or by the gene–disease model checkpoint found," if hetero_count == 1
                    else f", or by one of the {hetero_count} gene–disease model checkpoints found,")
     st.caption(
-        "The Predict Disease Genes tab and the export rank candidates by network enrichment" + hetero_note
+        "The Predict Disease Genes tab and the export rank candidates by trait co-association or network "
+        "enrichment" + hetero_note
         + " using only the network. Find Similar Genes and Check Gene Pair need a protein–protein model."
     )
     if graph is None:
@@ -210,7 +211,7 @@ else:
     model_type = None
     col_bar, col_switch = st.columns([3, 1])
     col_bar.markdown(
-        "**Active model:** none — ranking by network enrichment or a gene–disease model · "
+        "**Active model:** none — ranking by trait co-association, network enrichment or a gene–disease model · "
         f"**Genes loaded:** {len(node_list):,}"
     )
     if col_switch.button("Load a protein–protein model instead"):
@@ -224,21 +225,21 @@ else:
 disease_index = index_disease_genes(graph, node_list) if graph else {}
 
 # ---------------------------------------------------------------------------
-# Ranking scorer: network enrichment by default; trait co-association (the gene's GWAS
-# associations with the traits most similar to the disease, no model needed); or a trained
+# Ranking scorer: trait co-association by default (the gene's GWAS associations with the traits most
+# similar to the disease, no model needed); network enrichment (STRING guilt-by-association, the default
+# until 2026-11-08 and the fallback when a checkpoint cannot score the network); or a trained
 # heterogeneous gene–disease model when a checkpoint from scripts/train_hetero_disease_model.py exists.
 # ---------------------------------------------------------------------------
 _CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".datasets", "trained_models")
-SCORER_ENRICHMENT_LABEL = "Network enrichment (default)"
-# Benchmark (README, "Held-out disease-gene benchmark"): co-association recall@50 0.260 vs enrichment 0.042,
-# strict 0.193; part of the gain comes from GWAS Catalog alias traits.
-SCORER_COASSOCIATION_LABEL = ("Trait co-association (genes of the GWAS traits most similar to the disease; "
-                              "~6× enrichment on the benchmark)")
+# Benchmark (README, "Held-out disease-gene benchmark"): recall@50 co-association 0.260, strict 0.193,
+# enrichment 0.042; part of the co-association gain comes from GWAS Catalog alias traits.
+SCORER_COASSOCIATION_LABEL = ("Trait co-association (default; genes of the GWAS traits most similar to the "
+                              "disease; recall@50 0.26 on the benchmark)")
 SCORER_COASSOCIATION_STRICT_LABEL = ("Trait co-association, strict (traits sharing a word with the disease name "
-                                     "excluded; ~4.5× enrichment)")
-# On the held-out benchmark (README, "Held-out disease-gene benchmark") the hetero model alone is far
-# below enrichment and its z-score blend with enrichment at or slightly above it: enrichment stays the
-# default, the blend comes next, the model alone is experimental.
+                                     "excluded; recall@50 0.19)")
+SCORER_ENRICHMENT_LABEL = "Network enrichment (STRING partners of the known genes; recall@50 0.04)"
+# The hetero model alone is far below enrichment and its z-score blend with enrichment at or slightly
+# above it: the blend comes after enrichment, the model alone is experimental.
 SCORER_BLEND_NOTE = "(z-score blend, at or slightly above enrichment on the benchmark)"
 SCORER_HETERO_NOTE = "(experimental, below enrichment on the benchmark)"
 _hetero_paths = list(reversed(find_hetero_checkpoints(_CHECKPOINT_DIR)))
@@ -252,19 +253,24 @@ _scorer_kinds = {   # label -> (scorer name for the manifest, checkpoint path or
     SCORER_COASSOCIATION_LABEL: (COASSOCIATION_SCORER, None),
     SCORER_COASSOCIATION_STRICT_LABEL: (COASSOCIATION_STRICT_SCORER, None),
 }
+scorer_options = list(_scorer_kinds) + [SCORER_ENRICHMENT_LABEL]   # the first option is the default
 for _p in _hetero_paths:
-    _scorer_kinds[f"Enrichment + gene–disease model: {_checkpoint_name(_p)} {SCORER_BLEND_NOTE}"] = (BLEND_SCORER, _p)
+    _label = f"Enrichment + gene–disease model: {_checkpoint_name(_p)} {SCORER_BLEND_NOTE}"
+    _scorer_kinds[_label] = (BLEND_SCORER, _p)
+    scorer_options.append(_label)
 for _p in _hetero_paths:
-    _scorer_kinds[f"Gene–disease model: {_checkpoint_name(_p)} {SCORER_HETERO_NOTE}"] = (HETERO_SCORER, _p)
-scorer_options = [SCORER_ENRICHMENT_LABEL] + list(_scorer_kinds)
+    _label = f"Gene–disease model: {_checkpoint_name(_p)} {SCORER_HETERO_NOTE}"
+    _scorer_kinds[_label] = (HETERO_SCORER, _p)
+    scorer_options.append(_label)
 SCORER_HELP = (
-    "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the "
-    "disease's known genes (the validated default). **Trait co-association** ranks by the gene's GWAS "
-    "associations with the 20 traits most similar to the disease (cosine similarity of their gene sets), "
-    "weighted by similarity and association strength: on the held-out benchmark it recovered 26 % of hidden "
-    "disease genes in the top 50 against 4 % for enrichment, with no hub genes. Part of that gain comes from "
-    "GWAS Catalog alias traits ('diabetes mellitus' for type 2 diabetes); the **strict** variant drops traits "
-    "that share a word with the disease name (19 % on the benchmark). Enrichment breaks ties for both. "
+    "**Trait co-association** (the default) ranks by the gene's GWAS associations with the 20 traits most "
+    "similar to the disease (cosine similarity of their gene sets), weighted by similarity and association "
+    "strength: on the held-out benchmark it recovered 26 % of hidden disease genes in the top 50, with no hub "
+    "genes. Part of that gain comes from GWAS Catalog alias traits ('diabetes mellitus' for type 2 diabetes); "
+    "the **strict** variant drops traits that share a word with the disease name (19 % on the benchmark). "
+    "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the disease's "
+    "known genes (4 % on the benchmark; the default until trait co-association, and the fallback when a "
+    "checkpoint cannot score the network); it also breaks ties for the co-association rankings. "
     "**Enrichment + gene–disease model** adds, per disease, "
     "the z-score of a heterogeneous graph neural network's score to the z-score of enrichment: on the "
     "held-out benchmark this blend recovered about as many hidden disease genes in the top 50 as enrichment "
@@ -353,12 +359,13 @@ tab_disease, tab_gene, tab_link = st.tabs([
 # === Tab 1: Disease Gene Discovery ===
 with tab_disease:
     st.markdown(
-        "**Pick a disease** to rank candidate genes by how strongly their STRING interaction "
-        "partners are enriched for the disease's known genes (guilt-by-association). "
-        + ("Ties, mostly genes with no known partner, are broken by similarity of the model's learned "
-           "profiles. " if z_norm is not None else "")
-        + "**Trait co-association** ranks instead by the gene's associations with the GWAS traits most "
-        "similar to the disease, and a trained gene–disease model, when available, by its score. "
+        "**Pick a disease** to rank candidate genes by trait co-association: the gene's GWAS associations "
+        "with the traits most similar to the disease, weighted by how similar they are (the default; the "
+        "traits behind each candidate are shown). **Network enrichment** ranks instead by how strongly the "
+        "gene's STRING partners are enriched for the disease's known genes"
+        + (", with ties, mostly genes with no known partner, broken by similarity of the model's learned "
+           "profiles" if z_norm is not None else "")
+        + ", and a trained gene–disease model, when available, by its score. "
         "Candidates are hypotheses for follow-up, not a diagnosis."
     )
 

@@ -95,7 +95,7 @@ scorers stay in the CLI and the benchmark only (Section 8 records the outcome). 
 the export review the user chose to offer the z-score blend on the page as *Enrichment + gene–disease model*
 (`hetero_scorer.blend_with_enrichment`, manifest scorer `hetero-gnn+enrichment-z`, `model_score` = the blend);
 enrichment stays the default and the model alone stays experimental.
-Amendment 2026-11-08 (b): trait co-association (`docs/superpowers/specs/2026-11-08-trait-coassociation-scorer-design.md`) joins the Ranking score options (always available, no checkpoint) and the benchmark (`coassociation`, `coassociation-strict`); enrichment stays the default.
+Amendment 2026-11-08 (b): trait co-association (`docs/superpowers/specs/2026-11-08-trait-coassociation-scorer-design.md`) joins the Ranking score options (always available, no checkpoint) and the benchmark (`coassociation`, `coassociation-strict`); later the same day the user made it the default ranking, so enrichment is now the STRING-only alternative and the fallback when a checkpoint cannot score the network.
 
 ---
 

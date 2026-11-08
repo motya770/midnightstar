@@ -16,10 +16,11 @@ Examples (run from the repo root):
     python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
         --hetero-checkpoint .datasets/trained_models/hetero_gnn_<stamp>_checkpoint.pt
 
-Without options the benchmark runs enrichment (the production default) and the two
-trait co-association rows, which need no model. With a hetero checkpoint the benchmark uses the split stored in it, so the model
-is scored on exactly the pairs it never saw; a checkpoint trained with
---no-holdout has no such split and is refused.
+Without options the benchmark runs the two trait co-association rows (`coassociation`
+is the Predictions page's default ranking) and enrichment, none of which needs a model.
+With a hetero checkpoint the benchmark uses the split stored in it, so the model is
+scored on exactly the pairs it never saw; a checkpoint trained with --no-holdout has
+no such split and is refused.
 """
 import argparse
 import json

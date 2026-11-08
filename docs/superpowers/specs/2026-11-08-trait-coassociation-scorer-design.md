@@ -19,7 +19,7 @@ Ship trait co-association as a first-class scorer:
 3. a strict variant that excludes traits sharing a word with the disease name, for users who want the pleiotropy signal without the alias traits;
 4. the export bundle names the scorer and its parameters, carries the supporting traits per candidate and, in a third CSV, each exported disease's similar traits with their similarity, so Claude Science can inspect why a candidate ranks where it does (author's call after the builder check: the bundle holds no GWAS index, so without that file the ranking could not be examined outside the app).
 
-Enrichment stays the default ranking (author's call: switching the default is a separate decision, best made after the user has looked at real candidate lists; the option's label states the benchmark gain so the choice is informed).
+Enrichment stays the default ranking (author's call: switching the default is a separate decision, best made after the user has looked at real candidate lists; the option's label states the benchmark gain so the choice is informed). **Amendment 2026-11-08:** after the scorer shipped the user made trait co-association the default ("Yes, make it default"); the page lists it first, enrichment remains the STRING-only alternative and the fallback when a gene–disease checkpoint cannot score the network, and the export manifest still records whichever scorer ranked.
 
 ## Non-goals
 
