@@ -9,12 +9,15 @@ Examples (run from the repo root):
 
     python scripts/benchmark_disease_genes.py --graph full_s800_gwas
     python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
+        --scorers enrichment,coassociation,coassociation-strict
+    python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
         --checkpoint .datasets/trained_models/gnn_20261030_012253_checkpoint.pt \
         --scorers enrichment,cosine,centred-cosine --json benchmark.json
     python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
         --hetero-checkpoint .datasets/trained_models/hetero_gnn_<stamp>_checkpoint.pt
 
-With a hetero checkpoint the benchmark uses the split stored in it, so the model
+Without options the benchmark runs enrichment (the production default) and the two
+trait co-association rows, which need no model. With a hetero checkpoint the benchmark uses the split stored in it, so the model
 is scored on exactly the pairs it never saw; a checkpoint trained with
 --no-holdout has no such split and is refused.
 """
@@ -30,7 +33,8 @@ import torch  # noqa: E402
 
 from src.data.bulk_datasets import DATA_DIR_DEFAULT, BulkDatasetManager  # noqa: E402
 from src.utils.benchmark import (  # noqa: E402
-    EMBEDDING_SCORERS, HETERO_SCORERS, REFERENCE_SCORERS, HoldoutSplit, make_holdout, reference_scorers,
+    COASSOCIATION_SCORERS, EMBEDDING_SCORERS, HETERO_SCORERS, REFERENCE_SCORERS, HoldoutSplit, make_holdout,
+    reference_scorers,
 )
 from src.utils.discovery import index_disease_genes  # noqa: E402
 from src.utils.hetero_scorer import hetero_score_matrix, load_hetero_checkpoint  # noqa: E402
@@ -117,7 +121,7 @@ def main(argv=None) -> int:
     if args.scorers:
         names = args.scorers.split(",")
     else:
-        names = ["enrichment"]
+        names = ["enrichment"] + list(COASSOCIATION_SCORERS)
         if z is not None:
             names += list(EMBEDDING_SCORERS)
         if hetero_scores is not None:

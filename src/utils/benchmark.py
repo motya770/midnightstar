@@ -16,7 +16,11 @@ A scorer is either a callable with the signature of
 ``discovery.predict_gene_disease_links`` (it receives the masked index, so it
 cannot see the hidden genes) or a precomputed score matrix of shape
 (n_nodes, n_diseases) in ``split.diseases`` order. Ties in a matrix get their
-average rank; a callable scorer supplies its own ranks.
+average rank; a callable scorer supplies its own ranks. The trait co-association
+rows (``coassociation``, ``coassociation-strict``) always take the matrix path,
+with enrichment breaking ties exactly (``tie_break``) and remaining ties
+averaged, even when embeddings are given: the page's embedding-similarity
+tie-break only orders genes tied on both scores.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ import torch
 import torch.nn.functional as F
 from scipy.stats import rankdata
 
+from src.utils.coassociation import coassociation_scores
 from src.utils.discovery import select_diseases
 
 RECALL_KS = (50, 200)
@@ -262,6 +267,20 @@ def zscore_sum(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return z(a) + z(b)
 
 
+def tie_break(primary: np.ndarray, secondary: np.ndarray) -> np.ndarray:
+    """A score that orders by ``primary`` and breaks its ties by ``secondary`` (per column, higher is
+    better): the dense rank of the primary scaled past the range of the secondary's dense rank, plus
+    the latter. Exact integer arithmetic, so a higher secondary never beats a higher primary, and
+    genes tied on both stay tied (the benchmark then averages their ranks)."""
+    primary, secondary = np.asarray(primary, dtype=float), np.asarray(secondary, dtype=float)
+    out = np.empty_like(primary)
+    for j in range(primary.shape[1]):
+        first = rankdata(primary[:, j], method="dense")
+        second = rankdata(secondary[:, j], method="dense")
+        out[:, j] = first * (len(second) + 1.0) + second
+    return out
+
+
 def fallback(primary: np.ndarray, secondary: np.ndarray) -> np.ndarray:
     """``primary`` where it is positive; elsewhere ``secondary``, rescaled per column to sit
     strictly below the smallest positive primary score while keeping its own order."""
@@ -299,19 +318,22 @@ def centroid_cosine_matrix(z, node_list, node_to_idx, index: dict[str, dict], di
     return (z_norm @ torch.stack(signatures, dim=1)).numpy()
 
 
+COASSOCIATION_SCORERS = ("coassociation", "coassociation-strict")
 EMBEDDING_SCORERS = ("cosine", "centred-cosine")
 HETERO_SCORERS = ("hetero", "hetero+enrichment", "hetero+enrichment-z", "enrichment>hetero")
-REFERENCE_SCORERS = ("enrichment",) + EMBEDDING_SCORERS + HETERO_SCORERS
+REFERENCE_SCORERS = ("enrichment",) + COASSOCIATION_SCORERS + EMBEDDING_SCORERS + HETERO_SCORERS
 
 
 def reference_scorers(names, graph, node_list, node_to_idx, index: dict[str, dict], split: HoldoutSplit,
                       z=None, hetero_scores=None) -> dict[str, BenchmarkResult]:
     """Benchmark the named scorers.
 
-    ``enrichment`` is the production ranking; ``cosine`` / ``centred-cosine`` need the
-    protein–protein embeddings ``z``; ``hetero`` and its combinations with enrichment
-    (rank average, z-score sum, enrichment with the model as fallback for genes with
-    no known partner) need the hetero model's ``hetero_scores`` matrix.
+    ``enrichment`` is the production ranking; ``coassociation`` / ``coassociation-strict``
+    are trait co-association over the masked index with enrichment breaking ties (no model
+    needed); ``cosine`` / ``centred-cosine`` need the protein–protein embeddings ``z``;
+    ``hetero`` and its combinations with enrichment (rank average, z-score sum, enrichment
+    with the model as fallback for genes with no known partner) need the hetero model's
+    ``hetero_scores`` matrix.
     """
     from src.utils.discovery import enrichment_matrix, predict_gene_disease_links
 
@@ -327,7 +349,7 @@ def reference_scorers(names, graph, node_list, node_to_idx, index: dict[str, dic
 
     masked = mask_index(index, split)
     enrichment = None
-    if any(n in HETERO_SCORERS and n != "hetero" for n in names):
+    if any(n in COASSOCIATION_SCORERS or (n in HETERO_SCORERS and n != "hetero") for n in names):
         enrichment = enrichment_matrix(graph, node_list, node_to_idx, masked, split.diseases)
     if hetero_scores is not None:
         hetero_scores = np.asarray(hetero_scores, dtype=float)
@@ -346,7 +368,11 @@ def reference_scorers(names, graph, node_list, node_to_idx, index: dict[str, dic
                     enrichment = enrichment_matrix(graph, node_list, node_to_idx, masked, split.diseases)
                 results[name] = run_benchmark(enrichment, graph, node_list, node_to_idx, index, split)
             continue
-        if name in EMBEDDING_SCORERS:
+        if name in COASSOCIATION_SCORERS:
+            scores = coassociation_scores(masked, node_list, node_to_idx, split.diseases,
+                                          exclude_name_sharing=(name == "coassociation-strict"))
+            matrix = tie_break(scores.matrix, enrichment)
+        elif name in EMBEDDING_SCORERS:
             matrix = centroid_cosine_matrix(z, node_list, node_to_idx, masked, split.diseases,
                                             centre=(name == "centred-cosine"))
         elif name == "hetero":

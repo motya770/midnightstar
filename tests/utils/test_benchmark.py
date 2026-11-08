@@ -335,3 +335,27 @@ def test_run_benchmark_with_score_matrix_refuses_hidden_genes_missing_from_the_g
                        min_known_genes=split.min_known_genes)
     with pytest.raises(ValueError, match="hidden gene"):
         run_benchmark(np.zeros((len(node_list), len(bad.diseases))), G, node_list, node_to_idx, index, bad)
+
+
+# ---- trait co-association rows ------------------------------------------------
+
+def test_tie_break_orders_by_primary_then_secondary_and_keeps_remaining_ties():
+    from scipy.stats import rankdata
+    from src.utils.benchmark import tie_break
+
+    primary = np.array([[1.0], [1.0], [0.0], [1.0], [0.0]])
+    secondary = np.array([[0.2], [0.9], [5.0], [0.9], [1.0]])
+    ranks = rankdata(-tie_break(primary, secondary)[:, 0], method="average")
+    assert ranks.tolist() == [3.0, 1.5, 4.0, 1.5, 5.0]     # a higher secondary never beats a higher primary
+
+
+def test_reference_scorers_runs_coassociation_rows_without_embeddings_or_hetero_scores():
+    from src.utils.benchmark import COASSOCIATION_SCORERS, REFERENCE_SCORERS, reference_scorers
+
+    assert COASSOCIATION_SCORERS == ("coassociation", "coassociation-strict")
+    assert all(name in REFERENCE_SCORERS for name in COASSOCIATION_SCORERS)
+    G, node_list, node_to_idx, index, split = setup()
+    results = reference_scorers(list(COASSOCIATION_SCORERS), G, node_list, node_to_idx, index, split)
+    assert list(results) == list(COASSOCIATION_SCORERS)
+    hidden = split.hidden["Asthma"][0]          # an asthma gene; every asthma gene also has Height
+    assert results["coassociation"].hidden_ranks["Asthma"][hidden] <= 6   # among the six Height genes, above G10/G11
