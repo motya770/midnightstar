@@ -11,6 +11,7 @@ import os
 import datetime
 import glob as glob_mod
 from src.utils import session
+from src.utils.coassociation import annotate_supporting_traits, coassociation_scores
 from src.utils.discovery import (
     index_disease_genes,
     known_links_rows,
@@ -19,6 +20,8 @@ from src.utils.discovery import (
 )
 from src.utils.discovery_export import (
     BLEND_SCORER,
+    COASSOCIATION_SCORER,
+    COASSOCIATION_STRICT_SCORER,
     ENRICHMENT_SCORER,
     HETERO_SCORER,
     PREDICTED_FILE,
@@ -221,11 +224,18 @@ else:
 disease_index = index_disease_genes(graph, node_list) if graph else {}
 
 # ---------------------------------------------------------------------------
-# Ranking scorer: network enrichment by default, or a trained heterogeneous
-# gene–disease model when a checkpoint from scripts/train_hetero_disease_model.py exists.
+# Ranking scorer: network enrichment by default; trait co-association (the gene's GWAS
+# associations with the traits most similar to the disease, no model needed); or a trained
+# heterogeneous gene–disease model when a checkpoint from scripts/train_hetero_disease_model.py exists.
 # ---------------------------------------------------------------------------
 _CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".datasets", "trained_models")
 SCORER_ENRICHMENT_LABEL = "Network enrichment (default)"
+# Benchmark (README, "Held-out disease-gene benchmark"): co-association recall@50 0.260 vs enrichment 0.042,
+# strict 0.193; part of the gain comes from GWAS Catalog alias traits.
+SCORER_COASSOCIATION_LABEL = ("Trait co-association (genes of the GWAS traits most similar to the disease; "
+                              "~6× enrichment on the benchmark)")
+SCORER_COASSOCIATION_STRICT_LABEL = ("Trait co-association, strict (traits sharing a word with the disease name "
+                                     "excluded; ~4.5× enrichment)")
 # On the held-out benchmark (README, "Held-out disease-gene benchmark") the hetero model alone is far
 # below enrichment and its z-score blend with enrichment at or slightly above it: enrichment stays the
 # default, the blend comes next, the model alone is experimental.
@@ -238,7 +248,10 @@ def _checkpoint_name(path):
     return os.path.basename(path).replace("_checkpoint.pt", "")
 
 
-_scorer_kinds = {}   # label -> (scorer name for the manifest, checkpoint path)
+_scorer_kinds = {   # label -> (scorer name for the manifest, checkpoint path or None)
+    SCORER_COASSOCIATION_LABEL: (COASSOCIATION_SCORER, None),
+    SCORER_COASSOCIATION_STRICT_LABEL: (COASSOCIATION_STRICT_SCORER, None),
+}
 for _p in _hetero_paths:
     _scorer_kinds[f"Enrichment + gene–disease model: {_checkpoint_name(_p)} {SCORER_BLEND_NOTE}"] = (BLEND_SCORER, _p)
 for _p in _hetero_paths:
@@ -246,7 +259,13 @@ for _p in _hetero_paths:
 scorer_options = [SCORER_ENRICHMENT_LABEL] + list(_scorer_kinds)
 SCORER_HELP = (
     "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the "
-    "disease's known genes (the validated default). **Enrichment + gene–disease model** adds, per disease, "
+    "disease's known genes (the validated default). **Trait co-association** ranks by the gene's GWAS "
+    "associations with the 20 traits most similar to the disease (cosine similarity of their gene sets), "
+    "weighted by similarity and association strength: on the held-out benchmark it recovered 26 % of hidden "
+    "disease genes in the top 50 against 4 % for enrichment, with no hub genes. Part of that gain comes from "
+    "GWAS Catalog alias traits ('diabetes mellitus' for type 2 diabetes); the **strict** variant drops traits "
+    "that share a word with the disease name (19 % on the benchmark). Enrichment breaks ties for both. "
+    "**Enrichment + gene–disease model** adds, per disease, "
     "the z-score of a heterogeneous graph neural network's score to the z-score of enrichment: on the "
     "held-out benchmark this blend recovered about as many hidden disease genes in the top 50 as enrichment "
     "alone or somewhat more (−2 % to +16 % across the checkpoints tried; recall@200 was mixed). "
@@ -263,30 +282,34 @@ def _hetero_encoding(checkpoint_path, graph_token, _graph):
 
 
 def scorer_for(label, diseases):
-    """(score matrix or None, scorer name for the manifest, checkpoint path or None).
+    """(score matrix or None, scorer name for the manifest, checkpoint path or None,
+    CoassociationScores or None).
 
-    When the checkpoint cannot score this network (different traits or gene features, unreadable
-    file), the ranking falls back to network enrichment with a visible warning, and the manifest
-    records enrichment."""
+    The co-association result carries the similar traits per disease, for the supporting-traits
+    column and the export's similar_traits.csv. When a checkpoint cannot score this network
+    (different traits or gene features, unreadable file), the ranking falls back to network
+    enrichment with a visible warning, and the manifest records enrichment."""
     if label == SCORER_ENRICHMENT_LABEL or label not in _scorer_kinds:
-        return None, ENRICHMENT_SCORER, None
+        return None, ENRICHMENT_SCORER, None, None
     scorer_name, path = _scorer_kinds[label]
     diseases = list(diseases)
+    if scorer_name in (COASSOCIATION_SCORER, COASSOCIATION_STRICT_SCORER):
+        coassociation = coassociation_scores(disease_index, node_list, node_to_idx, diseases,
+                                             exclude_name_sharing=(scorer_name == COASSOCIATION_STRICT_SCORER))
+        return coassociation.matrix, scorer_name, None, coassociation
     try:
         encoding = _hetero_encoding(path, session.get_graph_token(), graph)
         matrix = score_from_encoding(encoding, diseases)
     except (ValueError, RuntimeError, KeyError) as e:
         st.warning("The gene–disease checkpoint cannot score this network, so this ranking uses network "
                    f"enrichment instead. {str(e)[:300]}")
-        return None, ENRICHMENT_SCORER, None
+        return None, ENRICHMENT_SCORER, None, None
     if scorer_name == BLEND_SCORER:
         matrix = blend_with_enrichment(matrix, graph, node_list, node_to_idx, disease_index, diseases)
-    return matrix, scorer_name, path
+    return matrix, scorer_name, path, None
 
 
 def pick_scorer(key):
-    if len(scorer_options) == 1:
-        return SCORER_ENRICHMENT_LABEL
     return st.selectbox("Ranking score", scorer_options, key=key, help=SCORER_HELP)
 
 
@@ -334,8 +357,9 @@ with tab_disease:
         "partners are enriched for the disease's known genes (guilt-by-association). "
         + ("Ties, mostly genes with no known partner, are broken by similarity of the model's learned "
            "profiles. " if z_norm is not None else "")
-        + "When a trained gene–disease model is available you can rank by its score "
-        "instead. Candidates are hypotheses for follow-up, not a diagnosis."
+        + "**Trait co-association** ranks instead by the gene's associations with the GWAS traits most "
+        "similar to the disease, and a trained gene–disease model, when available, by its score. "
+        "Candidates are hypotheses for follow-up, not a diagnosis."
     )
 
     if disease_index:
@@ -370,11 +394,13 @@ with tab_disease:
 
             if st.button("🔮 Predict New Genes", type="primary"):
                 known_genes = sorted(disease_index[selected_disease]["genes"])
-                scores, scorer_name, _ = scorer_for(disease_scorer, [selected_disease])
+                scores, scorer_name, _, coassociation = scorer_for(disease_scorer, [selected_disease])
                 candidates = predict_gene_disease_links(
                     z_norm, node_list, node_to_idx, graph, disease_index, [selected_disease], top_k,
                     scores=scores,
                 )
+                if coassociation is not None:
+                    annotate_supporting_traits(candidates, coassociation)
 
                 if candidates:
                     col_known, col_pred = st.columns(2)
@@ -389,8 +415,14 @@ with tab_disease:
 
                     with col_pred:
                         st.markdown(f"**Candidates ({len(candidates)} genes):**")
-                        score_column = {HETERO_SCORER: "Model score", BLEND_SCORER: "Blend score"}.get(scorer_name)
-                        if scorer_name == BLEND_SCORER:
+                        score_column = {HETERO_SCORER: "Model score", BLEND_SCORER: "Blend score",
+                                        COASSOCIATION_SCORER: "Co-association score",
+                                        COASSOCIATION_STRICT_SCORER: "Co-association score"}.get(scorer_name)
+                        if coassociation is not None:
+                            st.caption(f"Ranked by the gene's GWAS associations with the "
+                                       f"{len(coassociation.similar_traits[0])} traits most similar to this disease, "
+                                       "weighted by similarity and association strength; enrichment breaks ties")
+                        elif scorer_name == BLEND_SCORER:
                             st.caption("Ranked by the sum of the per-disease z-scores of enrichment and the "
                                        "gene–disease model's score")
                         elif scorer_name == HETERO_SCORER:
@@ -400,12 +432,17 @@ with tab_disease:
                         pred_df = pd.DataFrame([{
                             "Gene": c["gene"],
                             **({score_column: c["model_score"]} if score_column else {}),
+                            **({"Supporting traits": c["supporting_traits"]} if coassociation is not None else {}),
                             "Enrichment": c["enrichment_score"],
                             "Known interactors": c["known_interactors"],
                             **({"Similarity": c["similarity"]} if z_norm is not None else {}),
                             "Description": c["gene_description"],
                         } for c in candidates])
                         st.dataframe(pred_df, height=300)
+                        if coassociation is not None:
+                            with st.expander(f"Traits most similar to {selected_disease}"):
+                                st.dataframe(pd.DataFrame(coassociation.similar_traits[0],
+                                                          columns=["Trait", "Similarity"]), height=300)
 
                     # Visualization: known genes that touch the shown candidates first
                     st.subheader("Discovery network")
@@ -627,11 +664,15 @@ else:
         else:
             try:
                 with st.spinner(f"Scoring candidates for {len(chosen)} diseases..."):
-                    exp_scores, exp_scorer_name, exp_scorer_path = scorer_for(exp_scorer, chosen)
+                    exp_scores, exp_scorer_name, exp_scorer_path, exp_co = scorer_for(exp_scorer, chosen)
                     links = predict_gene_disease_links(
                         z_norm, node_list, node_to_idx, graph, disease_index, chosen, exp_top_k,
                         scores=exp_scores,
                     )
+                    exp_similar = None
+                    if exp_co is not None:
+                        annotate_supporting_traits(links, exp_co)
+                        exp_similar = exp_co.similar_trait_rows()
                     known = known_links_rows(disease_index, chosen)
                     manifest = build_manifest(
                         model_type=model_type,
@@ -648,10 +689,13 @@ else:
                         known=known,
                         scorer=exp_scorer_name,
                         scorer_checkpoint=exp_scorer_path,
+                        scorer_parameters=exp_co.parameters if exp_co is not None else None,
+                        similar_traits=exp_similar,
                     )
                     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     bundle = write_discovery_bundle(
                         os.path.join(exp_dir, f"discovery_{stamp}"), links, known, manifest,
+                        similar_traits=exp_similar,
                     )
             except OSError as e:
                 st.error(f"Could not write to `{exp_dir}`: {e}")
