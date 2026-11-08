@@ -152,7 +152,11 @@ def _ranks_from_matrix(scores: np.ndarray, graph, node_list, node_to_idx, split:
         candidates = np.flatnonzero(allowed)
         ranks = rankdata(-scores[candidates, j], method="average")
         rank_of = dict(zip(candidates.tolist(), ranks.tolist()))
-        hidden_ranks[disease] = {g: rank_of[node_to_idx[g]] for g in split.hidden[disease] if g in node_to_idx}
+        missing = [g for g in split.hidden[disease] if g not in node_to_idx]
+        if missing:
+            raise ValueError(f"hidden gene(s) {missing[:5]} of {disease!r} are not nodes of the scored graph; "
+                             f"the split belongs to a different graph")
+        hidden_ranks[disease] = {g: rank_of[node_to_idx[g]] for g in split.hidden[disease]}
     return hidden_ranks
 
 

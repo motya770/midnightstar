@@ -142,3 +142,13 @@ def test_is_hetero_checkpoint_path_matches_only_the_naming_pattern():
     assert is_hetero_checkpoint_path("/models/hetero_gnn_20261108_013654_checkpoint.pt")
     assert not is_hetero_checkpoint_path("/models/gnn_20261030_012253_checkpoint.pt")
     assert not is_hetero_checkpoint_path("/models/hetero_gnn_notes.txt")
+
+
+def test_align_gene_rows_places_gene_scores_on_the_full_node_list():
+    from src.utils.hetero_scorer import align_gene_rows
+    node_list = sorted(["A", "DIS:1", "B"])            # a non-gene node between the genes
+    aligned = align_gene_rows(np.array([[1.0, 10.0], [2.0, 20.0]]), ["A", "B"], node_list)
+    assert aligned.shape == (3, 2)
+    assert aligned[node_list.index("A")].tolist() == [1.0, 10.0]
+    assert aligned[node_list.index("B")].tolist() == [2.0, 20.0]
+    assert aligned[node_list.index("DIS:1")].tolist() == [0.0, 0.0]

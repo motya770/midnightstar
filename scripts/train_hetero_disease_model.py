@@ -4,8 +4,10 @@
 By default the benchmark's hidden gene–disease pairs (``make_holdout`` with the
 standard protocol) are removed from the graph before training, the model is
 benchmarked against the enrichment baseline on those pairs, and the split is
-stored in the checkpoint. ``--no-holdout`` trains on every known association for
-a production model; its benchmark numbers are then meaningless and are not run.
+stored in the checkpoint. ``--no-holdout`` skips that benchmark hold-out for a
+production model (a seeded validation hold-out of ``--val-fraction`` of each
+disease's genes still drives early stopping, and those pairs are kept as
+message-passing context in the saved model); no benchmark is run for it.
 
 Example (from the repo root):
 
@@ -28,7 +30,7 @@ from src.models.hetero_trainer import NEG_SAMPLING, HeteroTrainConfig, HeteroTra
 from src.utils.benchmark import HETERO_SCORERS, make_holdout, reference_scorers  # noqa: E402
 from src.utils.discovery import index_disease_genes  # noqa: E402
 from src.utils.hetero_graph_features import TRAIT_CATEGORIES, GENE_GENE, GENE_TRAIT, nx_to_hetero_data  # noqa: E402
-from src.utils.hetero_scorer import HETERO_MODEL_TYPE, save_hetero_checkpoint  # noqa: E402
+from src.utils.hetero_scorer import HETERO_MODEL_TYPE, align_gene_rows, save_hetero_checkpoint  # noqa: E402
 
 
 def parse_args(argv=None):
@@ -53,7 +55,8 @@ def parse_args(argv=None):
     parser.add_argument("--eval-every", type=int, default=1, help="validate every N epochs")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cpu", help="cpu or mps")
-    parser.add_argument("--no-holdout", action="store_true", help="train on all pairs (production model, no benchmark)")
+    parser.add_argument("--no-holdout", action="store_true",
+                        help="skip the benchmark hold-out (production model, no benchmark; validation hold-out still applies)")
     parser.add_argument("--no-save-run", action="store_true", help="do not record the run in the training-runs table")
     parser.add_argument("--json", help="write history, metrics and paths to this file")
     return parser.parse_args(argv)
@@ -109,8 +112,9 @@ def main(argv=None) -> int:
 
     results = {}
     if split is not None:
+        hetero_scores = align_gene_rows(trainer.score_matrix(split.diseases), bundle.node_list, node_list)
         results = reference_scorers(["enrichment", *HETERO_SCORERS], graph, node_list, node_to_idx, index, split,
-                                    hetero_scores=trainer.score_matrix(split.diseases))
+                                    hetero_scores=hetero_scores)
         width = max(len(n) for n in results)
         for name, result in results.items():
             print(f"{name:{width}s}  {result.summary()}")

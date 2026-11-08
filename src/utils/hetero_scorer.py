@@ -121,14 +121,27 @@ def score_from_encoding(encoding: HeteroEncoding, diseases) -> np.ndarray:
         warnings.warn(f"{len(missing)} disease(s) have no trait node in this checkpoint and score 0: "
                       f"{missing[:5]}", UserWarning, stacklevel=2)
 
-    node_list = encoding.node_list
-    matrix = np.zeros((len(node_list), len(diseases)))
+    gene_matrix = np.zeros((len(bundle.node_list), len(diseases)))
     if gene_scores is not None:
-        rows = np.array([node_list.index(g) for g in bundle.node_list]) if len(node_list) != len(bundle.node_list) \
-            else np.arange(len(node_list))
         cols = [j for j, d in enumerate(diseases) if d in bundle.trait_to_idx]
-        matrix[np.ix_(rows, cols)] = gene_scores
-    return matrix
+        gene_matrix[:, cols] = gene_scores
+    return align_gene_rows(gene_matrix, bundle.node_list, encoding.node_list)
+
+
+def align_gene_rows(gene_matrix: np.ndarray, gene_list, node_list) -> np.ndarray:
+    """Place a (n_genes × k) matrix on the rows of ``node_list`` (zeros for nodes that are not in ``gene_list``).
+
+    The hetero model scores genes only, while the benchmark and the Results page index every node of
+    the graph, disease nodes included.
+    """
+    gene_matrix = np.asarray(gene_matrix)
+    if len(gene_list) == len(node_list) and list(gene_list) == list(node_list):
+        return gene_matrix
+    node_to_row = {n: i for i, n in enumerate(node_list)}
+    rows = np.fromiter((node_to_row[g] for g in gene_list), dtype=np.int64, count=len(gene_list))
+    aligned = np.zeros((len(node_list), gene_matrix.shape[1]), dtype=gene_matrix.dtype)
+    aligned[rows] = gene_matrix
+    return aligned
 
 
 def hetero_score_matrix(checkpoint: dict, graph, diseases, *, honest: bool = False, device: str = "cpu") -> np.ndarray:

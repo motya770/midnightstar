@@ -327,3 +327,11 @@ def test_reference_enrichment_without_embeddings_uses_average_rank_ties():
     hidden = split.hidden["Asthma"][0]
     n_candidates = len(GENES) - len(split.visible["Asthma"])
     assert result.hidden_ranks["Asthma"][hidden] == pytest.approx((1 + n_candidates) / 2)
+
+
+def test_run_benchmark_with_score_matrix_refuses_hidden_genes_missing_from_the_graph():
+    G, node_list, node_to_idx, index, split = setup()
+    bad = HoldoutSplit(visible=split.visible, hidden={**split.hidden, "Asthma": split.hidden["Asthma"] + ["ZZZ"]},
+                       min_known_genes=split.min_known_genes)
+    with pytest.raises(ValueError, match="hidden gene"):
+        run_benchmark(np.zeros((len(node_list), len(bad.diseases))), G, node_list, node_to_idx, index, bad)

@@ -8,6 +8,7 @@ the benchmark's own hidden pairs were removed from the bundle before training.
 """
 from __future__ import annotations
 
+import warnings
 import copy
 import random
 from dataclasses import dataclass
@@ -103,6 +104,13 @@ class HeteroTrainer:
         self.val_split = make_holdout(masked, categories=categories, min_known_genes=min_known,
                                       hidden_fraction=self.config.val_fraction, seed=self.config.val_seed)
         self._val_index = masked
+        if not self.val_split.diseases:
+            message = (f"no validation diseases: none of the {categories} traits keeps {min_known}+ known genes "
+                       f"after the hold-out, so validation MRR would always be 0")
+            if self.config.early_stopping:
+                raise ValueError(message + "; early stopping needs a validation set (use a larger graph, lower "
+                                 "min_known_genes, or early_stopping=False)")
+            warnings.warn(message + "; training the full number of epochs", UserWarning, stacklevel=3)
 
         all_edges = bundle.data[GENE_TRAIT].edge_index.cpu()
         num_traits = max(len(bundle.trait_list), 1)
@@ -267,5 +275,9 @@ class HeteroTrainer:
         return self._matrix_from(z_gene, z_trait, list(diseases))
 
     def evaluate(self, split: HoldoutSplit) -> BenchmarkResult:
+        """Benchmark the model on ``split`` (the benchmark hold-out whose pairs are absent from the bundle).
+
+        Messages are every bundle edge, so passing ``self.val_split`` here would let the validation
+        pairs carry messages; use the trainer's internal validation (``history``) for those."""
         return run_benchmark(self.score_matrix(split.diseases), self._graph, self._bundle.node_list,
                              self._bundle.node_to_idx, self._index, split)

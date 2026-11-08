@@ -161,7 +161,11 @@ python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
 The last two columns measure hub concentration: how many distinct genes fill
 the 219 top-10 lists, and the most diseases any single gene ranks first for.
 Raw cosine is hub-dominated (287 genes, one of them first for 34 diseases); the
-hetero model is not (982 genes, none first for more than 10).
+hetero model is not (982 genes, none first for more than 10). One caveat on the
+cosine rows: the protein–protein checkpoint takes GWAS trait tokens as input
+features and is encoded on the full graph, so those embeddings have seen the
+hidden associations; the cosine baselines are optimistic and still lose.
+Enrichment and the hetero model only see the visible associations.
 
 The heterogeneous model's checkpoint (dot decoder, learning rate 1e-3,
 early-stopped at epoch 42 with 1 optimizer step per epoch, so undertrained)
@@ -204,8 +208,9 @@ full size; Apple MPS was several times slower for this model), validates on a
 second seeded hold-out of known disease genes scored the benchmark way, and
 keeps the best epoch. Options cover
 the decoder (`dot`, `bilinear`, `mlp`), degree-aware negatives, and dropping
-traits with few genes; `--no-holdout` trains a production model on every known
-pair once the honest one has been validated.
+traits with few genes; `--no-holdout` skips the benchmark hold-out for a
+production model once the honest one has been validated (a 10 % validation
+hold-out of disease genes still drives early stopping).
 
 When a hetero checkpoint exists in `.datasets/trained_models`, the Predictions
 page offers **Ranking score: Network enrichment (default) / Gene–disease
@@ -218,7 +223,7 @@ when enrichment ranked); the existing columns are unchanged.
 ## 🛠️ Development
 
 ```bash
-pytest                      # 158 tests, CPU only, about 15 s
+pytest                      # 162 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 

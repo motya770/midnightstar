@@ -3,6 +3,7 @@ import copy
 import math
 
 import networkx as nx
+import pytest
 import torch
 
 from src.models.hetero_gnn import HeteroGNNLinkPredictor
@@ -160,3 +161,50 @@ def test_eval_every_validates_on_a_schedule_and_counts_patience_in_evaluations()
     assert history["val_mrr"][0] == history["val_mrr"][1] == 0.0  # nothing evaluated yet
     assert history["best_epoch"] in history["eval_epochs"]
     assert len(calls) == 3
+
+
+def test_trainer_scores_align_to_graphs_with_non_gene_nodes():
+    """The training CLI benchmarks trainer.score_matrix against sorted(graph.nodes()), which may hold
+    disease nodes; the gene-only matrix must be aligned to that list instead of failing the shape check."""
+    from src.utils.benchmark import run_benchmark
+    from src.utils.hetero_scorer import align_gene_rows
+    G = make_graph()
+    G.add_node("DIS:1", node_type="disease")
+    G.add_edge("G00", "DIS:1")
+    node_list = sorted(G.nodes())
+    node_to_idx = {n: i for i, n in enumerate(node_list)}
+    index = index_disease_genes(G, node_list)
+    split = make_holdout(index)
+    bundle = nx_to_hetero_data(G, exclude_pairs={(g, d) for d, genes in split.hidden.items() for g in genes})
+    model = HeteroGNNLinkPredictor(gene_in=bundle.data["gene"].x.size(1), num_traits=len(bundle.trait_list),
+                                   hidden_channels=8)
+    trainer = HeteroTrainer(model, HeteroTrainConfig(epochs=1, early_stopping=False))
+    trainer.train(bundle, index, split, G)
+    gene_scores = trainer.score_matrix(split.diseases)
+    assert gene_scores.shape == (len(bundle.node_list), len(split.diseases))
+    aligned = align_gene_rows(gene_scores, bundle.node_list, node_list)
+    assert aligned.shape == (len(node_list), len(split.diseases))
+    result = run_benchmark(aligned, G, node_list, node_to_idx, index, split)
+    assert result.n_hidden == sum(len(g) for g in split.hidden.values())
+
+
+def test_empty_validation_set_is_refused_when_early_stopping():
+    """A disease with exactly 10 genes has 8 visible after benchmark masking, so nothing is left to validate on;
+    early stopping on an always-zero MRR would silently keep the epoch-1 weights."""
+    G = nx.Graph()
+    for i in range(10):
+        G.add_node(f"G{i}", node_type="gene", expression={"liver": 1.0},
+                   gwas={"disease": [{"trait": "Ten", "score": 0.9}]})
+    G.add_edges_from([(f"G{i}", f"G{i+1}") for i in range(9)])
+    node_list = sorted(G.nodes())
+    index = index_disease_genes(G, node_list)
+    split = make_holdout(index)
+    bundle = nx_to_hetero_data(G, exclude_pairs={(g, d) for d, genes in split.hidden.items() for g in genes})
+    gene_in = bundle.data["gene"].x.size(1)
+    with pytest.raises(ValueError, match="validation"):
+        HeteroTrainer(HeteroGNNLinkPredictor(gene_in=gene_in, num_traits=1, hidden_channels=8),
+                      HeteroTrainConfig(epochs=1)).train(bundle, index, split, G)
+    with pytest.warns(UserWarning, match="validation"):
+        history = HeteroTrainer(HeteroGNNLinkPredictor(gene_in=gene_in, num_traits=1, hidden_channels=8),
+                                HeteroTrainConfig(epochs=2, early_stopping=False)).train(bundle, index, split, G)
+    assert len(history["train_loss"]) == 2

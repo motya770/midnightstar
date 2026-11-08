@@ -144,6 +144,12 @@ manifest, and the existing bundle columns are unchanged. The z-score
 combination of enrichment and model score beats enrichment on every metric and
 is available in the benchmark CLI (`hetero+enrichment-z`), not in the UI.
 
+Caveat on the embedding baselines: the protein–protein checkpoint
+(`gnn_20261030_012253`) consumes GWAS trait tokens (`gwas_vocab_size` 14,287) and
+is encoded on the unmasked graph, so the cosine rows have seen the hidden
+associations and are optimistic; they lose regardless. Enrichment scores from
+the masked index and the hetero model from the graph with hidden pairs removed.
+
 Observations: the model shows no hub collapse (982 distinct genes in the 219
 top-10 lists versus 287 for raw cosine), its median rank is the best of all
 scorers (it ranks genes with no STRING partner, which enrichment cannot), but
