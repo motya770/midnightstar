@@ -263,7 +263,7 @@ for _p in _hetero_paths:
     _scorer_kinds[_label] = (HETERO_SCORER, _p)
     scorer_options.append(_label)
 SCORER_HELP = (
-    "**Trait co-association** (the default) ranks by the gene's GWAS associations with the 20 traits most "
+    "**Trait co-association** (the default) ranks by the gene's GWAS associations with the up to 20 traits most "
     "similar to the disease (cosine similarity of their gene sets), weighted by similarity and association "
     "strength: on the held-out benchmark it recovered 26 % of hidden disease genes in the top 50, with no hub "
     "genes. Part of that gain comes from GWAS Catalog alias traits ('diabetes mellitus' for type 2 diabetes); "

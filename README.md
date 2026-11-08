@@ -120,16 +120,17 @@ page can reload any checkpoint.
 
 The training objective is protein–protein link prediction on the STRING
 network. The **Predict Disease Genes** tab ranks genes by **trait
-co-association** by default: the gene's GWAS associations with the 20 traits
-whose gene sets are most similar to the disease, weighted by that similarity.
+co-association** by default: the gene's GWAS associations with the up to 20
+traits whose gene sets are most similar to the disease, weighted by that
+similarity.
 It needs no network and no model, lists the traits behind each candidate, and
 in a held-out check that hides 20 % of each trait's known genes it recovers
 them six times more often than **network enrichment** (the hypergeometric
 enrichment of the trait's known genes among a gene's STRING partners, the
 default until 2026-11-08 and still offered under *Ranking score*; see the
 benchmark below for the caveat on alias traits), which in turn recovers them
-about six times more often than ranking by embedding similarity alone, the
-hub-prone method the app started with. Enrichment breaks ties in the
+about six times more often than the raw embedding-similarity ranking the app
+started with (hub-prone; mean-centring it closes only half of that gap). Enrichment breaks ties in the
 co-association ranking, and cosine similarity of the learned embeddings breaks
 the remaining ones when a protein–protein model is loaded. Both are
 heuristics, not supervised disease classifiers. The **Export
@@ -190,7 +191,10 @@ recovers six times as many hidden genes in the top 50 as enrichment, with no
 hub genes. Part of the gain comes from GWAS Catalog alias traits ("diabetes
 mellitus" next to "type 2 diabetes mellitus"): the strict row drops every
 trait that shares a word with the disease name and still recovers 19 %.
-Adding STRING signals to co-association (smoothing over partners, z-score
+Near-duplicate traits under a different name are not what drives the number:
+no benchmark disease keeps a trait with cosine similarity above 0.9 to it, and
+dropping every trait above 0.8 (nine diseases) moves recall@50 from 0.260 to
+0.258 (strict: 0.193 to 0.191). Adding STRING signals to co-association (smoothing over partners, z-score
 sums or rank averages with enrichment) did not improve on it. The two
 co-association rows and the second enrichment row were measured without
 embeddings, so genes tied on every score share their average rank (which is
@@ -258,7 +262,7 @@ Genes tab and the export form and, when a hetero checkpoint exists in
 model** as well. Trait co-association became the default on 2026-11-08;
 enrichment remains the STRING-only alternative and the fallback when a
 checkpoint cannot score the network. Trait co-association shows the traits behind each candidate
-(*Supporting traits*) and lists the disease's 20 most similar traits; the
+(*Supporting traits*) and lists the disease's up to 20 most similar traits; the
 strict variant excludes traits that share a word with the disease name. The
 blend is the benchmark's `hetero+enrichment-z` (the sum of
 the per-disease z-scores of enrichment and the model's logit, each over all

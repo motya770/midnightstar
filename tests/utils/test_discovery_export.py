@@ -195,7 +195,7 @@ def test_manifest_records_coassociation_scorer_parameters_and_method_text():
     params = {"top_traits": 20, "weighting": "log1p(GWAS score)", "exclude_name_sharing": False}
     manifest = build_manifest(model_type="GNN", scorer=COASSOCIATION_SCORER, scorer_parameters=params, **kwargs)
     assert manifest["scorer"] == {"name": "trait-coassociation", "checkpoint": None, "parameters": params}
-    assert "20 most similar" in manifest["method"] and "then by similarity" in manifest["method"]
+    assert "up to 20 most similar" in manifest["method"] and "then by similarity" in manifest["method"]
     assert "shares a word" not in manifest["method"]
     strict = build_manifest(model_type=None, scorer=COASSOCIATION_STRICT_SCORER,
                             scorer_parameters={**params, "exclude_name_sharing": True}, **kwargs)

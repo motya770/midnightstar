@@ -108,8 +108,8 @@ _COASSOCIATION_METHOD_HEAD = (
     "Candidates are ranked by trait co-association: the GWAS traits most similar to the disease are "
     "found by cosine similarity of their gene sets (a gene × trait matrix of log1p GWAS scores over "
     "every association in the network, the disease's own column excluded), and each gene is scored by "
-    "the sum, over the disease's 20 most similar traits, of that similarity times log1p of the gene's "
-    "GWAS score for the trait. "
+    "the sum, over the disease's up to 20 most similar traits (fewer when fewer traits share a gene "
+    "with it), of that similarity times log1p of the gene's GWAS score for the trait. "
 )
 _COASSOCIATION_STRICT_SENTENCE = (
     "Traits whose name shares a word with the disease name (alias and multi-trait study names) were "
@@ -138,10 +138,6 @@ def _coassociation_method_text(strict: bool, no_protein: bool) -> str:
             + _COASSOCIATION_METHOD_TAIL)
 
 
-COASSOCIATION_METHOD_TEXT = _coassociation_method_text(strict=False, no_protein=False)
-COASSOCIATION_METHOD_TEXT_NO_PROTEIN = _coassociation_method_text(strict=False, no_protein=True)
-COASSOCIATION_STRICT_METHOD_TEXT = _coassociation_method_text(strict=True, no_protein=False)
-COASSOCIATION_STRICT_METHOD_TEXT_NO_PROTEIN = _coassociation_method_text(strict=True, no_protein=True)
 _ENRICHMENT_METHOD_HEAD = (
     "Candidates are ranked by guilt-by-association on the STRING protein interaction "
     "network: for each disease, every gene is scored by the hypergeometric enrichment of "
