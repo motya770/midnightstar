@@ -18,6 +18,7 @@ from src.utils.discovery import (
     select_diseases,
 )
 from src.utils.discovery_export import (
+    BLEND_SCORER,
     ENRICHMENT_SCORER,
     HETERO_SCORER,
     PREDICTED_FILE,
@@ -28,6 +29,7 @@ from src.utils.discovery_export import (
 from src.utils.hetero_scorer import (
     HETERO_MODEL_CLASS,
     HETERO_MODEL_TYPE,
+    blend_with_enrichment,
     find_hetero_checkpoints,
     hetero_encode,
     is_hetero_checkpoint_path,
@@ -224,22 +226,32 @@ disease_index = index_disease_genes(graph, node_list) if graph else {}
 # ---------------------------------------------------------------------------
 _CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".datasets", "trained_models")
 SCORER_ENRICHMENT_LABEL = "Network enrichment (default)"
-# The hetero model has not beaten enrichment on the held-out benchmark (README, "Held-out
-# disease-gene benchmark"), so it is offered as an experimental alternative, never as the default.
+# On the held-out benchmark (README, "Held-out disease-gene benchmark") the hetero model alone is far
+# below enrichment and its z-score blend with enrichment slightly above it: enrichment stays the
+# default, the blend comes next, the model alone is experimental.
+SCORER_BLEND_NOTE = "(z-score blend, slightly above enrichment on the benchmark)"
 SCORER_HETERO_NOTE = "(experimental, below enrichment on the benchmark)"
 _hetero_paths = list(reversed(find_hetero_checkpoints(_CHECKPOINT_DIR)))
-scorer_options = [SCORER_ENRICHMENT_LABEL] + [
-    f"Gene–disease model: {os.path.basename(p).replace('_checkpoint.pt', '')} {SCORER_HETERO_NOTE}"
-    for p in _hetero_paths
-]
-_scorer_paths = dict(zip(scorer_options[1:], _hetero_paths))
+
+
+def _checkpoint_name(path):
+    return os.path.basename(path).replace("_checkpoint.pt", "")
+
+
+_scorer_kinds = {}   # label -> (scorer name for the manifest, checkpoint path)
+for _p in _hetero_paths:
+    _scorer_kinds[f"Enrichment + gene–disease model: {_checkpoint_name(_p)} {SCORER_BLEND_NOTE}"] = (BLEND_SCORER, _p)
+for _p in _hetero_paths:
+    _scorer_kinds[f"Gene–disease model: {_checkpoint_name(_p)} {SCORER_HETERO_NOTE}"] = (HETERO_SCORER, _p)
+scorer_options = [SCORER_ENRICHMENT_LABEL] + list(_scorer_kinds)
 SCORER_HELP = (
     "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the "
-    "disease's known genes (the validated default). **Gene–disease model** ranks by a heterogeneous graph "
-    "neural network trained on gene–disease links. On the held-out benchmark the current checkpoint "
-    "recovers fewer hidden disease genes than enrichment on its own (it only helps when combined with "
-    "enrichment, see the README), so treat its ranking as experimental and compare checkpoints with "
-    "scripts/benchmark_disease_genes.py before trusting one."
+    "disease's known genes (the validated default). **Enrichment + gene–disease model** adds, per disease, "
+    "the z-score of a heterogeneous graph neural network's score to the z-score of enrichment: on the "
+    "held-out benchmark this blend recovered 2–11 % more hidden disease genes in the top 50 than enrichment "
+    "alone across the checkpoints tried (recall@200 was mixed). **Gene–disease model** ranks by that network "
+    "alone; it recovers far fewer hidden genes than enrichment and a few genes dominate its top ranks, so "
+    "treat it as experimental. Compare checkpoints with scripts/benchmark_disease_genes.py before trusting one."
 )
 
 
@@ -255,17 +267,20 @@ def scorer_for(label, diseases):
     When the checkpoint cannot score this network (different traits or gene features, unreadable
     file), the ranking falls back to network enrichment with a visible warning, and the manifest
     records enrichment."""
-    if label == SCORER_ENRICHMENT_LABEL or label not in _scorer_paths:
+    if label == SCORER_ENRICHMENT_LABEL or label not in _scorer_kinds:
         return None, ENRICHMENT_SCORER, None
-    path = _scorer_paths[label]
+    scorer_name, path = _scorer_kinds[label]
+    diseases = list(diseases)
     try:
         encoding = _hetero_encoding(path, session.get_graph_token(), graph)
-        matrix = score_from_encoding(encoding, list(diseases))
+        matrix = score_from_encoding(encoding, diseases)
     except (ValueError, RuntimeError, KeyError) as e:
         st.warning("The gene–disease checkpoint cannot score this network, so this ranking uses network "
                    f"enrichment instead. {str(e)[:300]}")
         return None, ENRICHMENT_SCORER, None
-    return matrix, HETERO_SCORER, path
+    if scorer_name == BLEND_SCORER:
+        matrix = blend_with_enrichment(matrix, graph, node_list, node_to_idx, disease_index, diseases)
+    return matrix, scorer_name, path
 
 
 def pick_scorer(key):
@@ -373,13 +388,17 @@ with tab_disease:
 
                     with col_pred:
                         st.markdown(f"**Candidates ({len(candidates)} genes):**")
-                        if scorer_name == HETERO_SCORER:
+                        score_column = {HETERO_SCORER: "Model score", BLEND_SCORER: "Blend score"}.get(scorer_name)
+                        if scorer_name == BLEND_SCORER:
+                            st.caption("Ranked by the sum of the per-disease z-scores of enrichment and the "
+                                       "gene–disease model's score")
+                        elif scorer_name == HETERO_SCORER:
                             st.caption("Ranked by the gene–disease model's score; enrichment shown for reference")
                         else:
                             st.caption("Enrichment = -log10 p that this many of the gene's partners are known disease genes")
                         pred_df = pd.DataFrame([{
                             "Gene": c["gene"],
-                            **({"Model score": c["model_score"]} if scorer_name == HETERO_SCORER else {}),
+                            **({score_column: c["model_score"]} if score_column else {}),
                             "Enrichment": c["enrichment_score"],
                             "Known interactors": c["known_interactors"],
                             **({"Similarity": c["similarity"]} if z_norm is not None else {}),

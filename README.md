@@ -225,12 +225,18 @@ production model once the honest one has been validated (a 10 % validation
 hold-out of disease genes still drives early stopping).
 
 When a hetero checkpoint exists in `.datasets/trained_models`, the Predictions
-page offers **Ranking score: Network enrichment (default) / Gene–disease
-model** in the Predict Disease Genes tab and the export form; the model option
-is labelled *experimental, below enrichment on the benchmark* until a checkpoint
-beats enrichment. The export's `manifest.json` names the scorer that produced
-the bundle, and the predicted links gain a trailing `model_score` column (empty
-when enrichment ranked); the existing columns are unchanged.
+page offers **Ranking score: Network enrichment (default) / Enrichment +
+gene–disease model / Gene–disease model** in the Predict Disease Genes tab and
+the export form. The blend is the benchmark's `hetero+enrichment-z` (the sum of
+the per-disease z-scores of enrichment and the model's logit); across the
+checkpoints tried it recovered 2–11 % more hidden disease genes in the top 50
+than enrichment alone, with mixed recall@200. The model alone is labelled
+*experimental, below enrichment on the benchmark*: it recovers far fewer hidden
+genes and a few genes dominate its top ranks. The export's `manifest.json`
+names the scorer that produced the bundle (`enrichment`,
+`hetero-gnn+enrichment-z` or `hetero-gnn`), and the predicted links gain a
+trailing `model_score` column holding that scorer's score (empty when
+enrichment ranked); the existing columns are unchanged.
 
 The Predictions page no longer needs a protein–protein model: **Predict without
 a protein model** (offered next to *Load Model*) ranks disease genes by network

@@ -91,7 +91,10 @@ Hidden size default 128.
 
 If the model does not beat enrichment, enrichment stays the default: the Results page still offers the
 checkpoint, but under a label marked *experimental, below enrichment on the benchmark*, and the combination
-scorers stay in the CLI and the benchmark only (Section 8 records the outcome).
+scorers stay in the CLI and the benchmark only (Section 8 records the outcome). Amendment 2026-11-08: after
+the export review the user chose to offer the z-score blend on the page as *Enrichment + gene–disease model*
+(`hetero_scorer.blend_with_enrichment`, manifest scorer `hetero-gnn+enrichment-z`, `model_score` = the blend);
+enrichment stays the default and the model alone stays experimental.
 
 ---
 
@@ -145,7 +148,8 @@ page offers the checkpoint under a label marked *experimental, below enrichment
 on the benchmark*, the export appends `model_score` and names the scorer in the
 manifest, and the existing bundle columns are unchanged. The z-score
 combination of enrichment and model score beats enrichment on every metric and
-is available in the benchmark CLI (`hetero+enrichment-z`), not in the UI.
+is available in the benchmark CLI (`hetero+enrichment-z`); since 2026-11-08 the
+Predictions page offers it too (Section 6 amendment).
 
 Caveat on the embedding baselines: the protein–protein checkpoint
 (`gnn_20261030_012253`) consumes GWAS trait tokens (`gwas_vocab_size` 14,287) and
