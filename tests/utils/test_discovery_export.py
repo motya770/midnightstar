@@ -98,15 +98,15 @@ def test_zip_bundle_contains_every_file_under_the_bundle_name(tmp_path):
 
 # ---- model scorer in the bundle -------------------------------------------------
 
-def test_predicted_columns_end_with_model_score_and_keep_existing_order():
+def test_predicted_columns_keep_existing_order_and_append_model_score_then_supporting_traits():
     from src.utils.discovery_export import PREDICTED_COLUMN_DOCS
 
-    assert PREDICTED_COLUMNS[:-1] == (
+    assert PREDICTED_COLUMNS[:-2] == (
         "disease", "category", "gene", "gene_description", "enrichment_score", "similarity",
         "rank", "n_known_genes", "known_interactors", "degree", "known_interactor_genes",
     )
-    assert PREDICTED_COLUMNS[-1] == "model_score"
-    assert "model_score" in PREDICTED_COLUMN_DOCS
+    assert PREDICTED_COLUMNS[-2:] == ("model_score", "supporting_traits")
+    assert "model_score" in PREDICTED_COLUMN_DOCS and "supporting_traits" in PREDICTED_COLUMN_DOCS
 
 
 def test_manifest_records_scorer_and_hetero_method_text():
@@ -135,7 +135,7 @@ def test_bundle_csv_writes_model_score_column(tmp_path):
     bundle = write_discovery_bundle(tmp_path / "b", links, known, manifest)
     df = pd.read_csv(bundle / PREDICTED_FILE)
     assert list(df.columns) == list(PREDICTED_COLUMNS)
-    assert df.columns[-1] == "model_score"
+    assert df.columns[-2] == "model_score"
     assert pd.isna(df.loc[0, "model_score"]) and df.loc[1, "model_score"] == 0.7
 
 
@@ -182,3 +182,48 @@ def test_blend_method_text_reports_the_benchmark_range_including_the_run_below_e
     from src.utils.discovery_export import BLEND_METHOD_TEXT
     assert "−2 % to +16 %" in BLEND_METHOD_TEXT
     assert "slightly more" not in BLEND_METHOD_TEXT
+
+
+def test_manifest_records_coassociation_scorer_parameters_and_method_text():
+    from src.utils.discovery_export import (
+        COASSOCIATION_SCORER, COASSOCIATION_STRICT_SCORER, SIMILAR_TRAITS_FILE, render_readme,
+    )
+
+    links, known = sample_rows()
+    kwargs = dict(metrics={"auc_roc": 0.9}, checkpoint_path="/x/ckpt.pt", graph_name="g", n_nodes=7, n_edges=5,
+                  embedding_dim=2, categories=["disease"], min_known_genes=2, top_k=50, links=links, known=known)
+    params = {"top_traits": 20, "weighting": "log1p(GWAS score)", "exclude_name_sharing": False}
+    manifest = build_manifest(model_type="GNN", scorer=COASSOCIATION_SCORER, scorer_parameters=params, **kwargs)
+    assert manifest["scorer"] == {"name": "trait-coassociation", "checkpoint": None, "parameters": params}
+    assert "20 most similar" in manifest["method"] and "then by similarity" in manifest["method"]
+    assert "shares a word" not in manifest["method"]
+    strict = build_manifest(model_type=None, scorer=COASSOCIATION_STRICT_SCORER,
+                            scorer_parameters={**params, "exclude_name_sharing": True}, **kwargs)
+    assert "shares a word" in strict["method"] and "similarity column is empty" in strict["method"]
+    assert "parameters" not in build_manifest(model_type="GNN", **kwargs)["scorer"]
+    assert "co-association" in PREDICTED_COLUMN_DOCS["model_score"] and "supporting_traits" in PREDICTED_COLUMN_DOCS
+    readme = render_readme(manifest)
+    assert "Ranking scorer: trait-coassociation (top_traits=20" in readme
+    assert "similar_traits.csv" not in readme and SIMILAR_TRAITS_FILE not in manifest["files"]
+
+
+def test_bundle_writes_similar_traits_file_only_for_coassociation_exports(tmp_path):
+    from src.utils.discovery_export import (
+        COASSOCIATION_SCORER, SIMILAR_TRAITS_COLUMNS, SIMILAR_TRAITS_FILE, render_readme,
+    )
+
+    links, known = sample_rows()
+    similar = [{"disease": "Asthma", "trait": "Allergic rhinitis", "similarity": 0.6174, "rank": 1},
+               {"disease": "Asthma", "trait": "Eczema", "similarity": 0.3361, "rank": 2}]
+    kwargs = dict(metrics={}, checkpoint_path=None, graph_name="g", n_nodes=7, n_edges=5, embedding_dim=None,
+                  categories=["disease"], min_known_genes=2, top_k=50, links=links, known=known)
+    manifest = build_manifest(model_type=None, scorer=COASSOCIATION_SCORER,
+                              scorer_parameters={"top_traits": 20}, similar_traits=similar, **kwargs)
+    assert manifest["counts"]["similar_traits"] == 2
+    assert list(manifest["files"][SIMILAR_TRAITS_FILE]["columns"]) == list(SIMILAR_TRAITS_COLUMNS)
+    bundle = write_discovery_bundle(tmp_path / "b", links, known, manifest, similar_traits=similar)
+    df = pd.read_csv(bundle / SIMILAR_TRAITS_FILE)
+    assert list(df.columns) == list(SIMILAR_TRAITS_COLUMNS) and df["trait"].tolist() == ["Allergic rhinitis", "Eczema"]
+    assert f"`{SIMILAR_TRAITS_FILE}`" in render_readme(manifest)
+    plain = write_discovery_bundle(tmp_path / "p", links, known, sample_manifest(links, known))
+    assert not (plain / SIMILAR_TRAITS_FILE).exists()
