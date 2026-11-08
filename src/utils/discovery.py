@@ -95,7 +95,7 @@ def enrichment_matrix(graph, node_list, node_to_idx, index, diseases) -> np.ndar
 
 
 def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, diseases,
-                               top_k: int, max_listed_interactors: int = 10) -> list[dict]:
+                               top_k: int, max_listed_interactors: int = 10, *, scores=None) -> list[dict]:
     """Rank candidate genes for each disease. One row per (disease, gene).
 
     Primary score: -log10 of the hypergeometric probability that a gene with its
@@ -103,8 +103,18 @@ def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, dis
     STRING partners (population = gene nodes). Tie-break: cosine similarity to
     the disease signature, the normalised mean embedding of the known genes.
     Known genes and non-gene nodes are never returned.
+
+    With ``scores``, a (len(node_list), len(diseases)) matrix from a trained
+    gene–disease model, that score ranks first and enrichment then similarity
+    break ties; each row then carries it as ``model_score`` (None otherwise).
     """
     z_norm = z_norm.detach().cpu()
+    diseases = list(diseases)
+    if scores is not None:
+        scores = scores.detach().cpu().numpy() if isinstance(scores, torch.Tensor) else np.asarray(scores, dtype=float)
+        if scores.shape != (len(node_list), len(diseases)):
+            raise ValueError(f"scores must be shaped (n_nodes={len(node_list)}, n_diseases={len(diseases)}), "
+                             f"got {scores.shape}")
     gene_mask = np.array([graph.nodes[v].get("node_type") == "gene" for v in node_list], dtype=bool)
     adjacency = _gene_adjacency(graph, node_list, node_to_idx, gene_mask)
     degree = np.asarray(adjacency.sum(axis=1)).ravel()
@@ -127,7 +137,10 @@ def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, dis
         candidates = np.flatnonzero(allowed)
         if candidates.size == 0:
             continue
-        order = candidates[np.lexsort((-similarity[candidates], -enrichment[candidates]))][:top_k]
+        keys = [-similarity[candidates], -enrichment[candidates]]
+        if scores is not None:
+            keys.append(-scores[candidates, j])
+        order = candidates[np.lexsort(keys)][:top_k]
 
         known_set = set(known)
         for rank, idx in enumerate(order.tolist(), start=1):
@@ -145,6 +158,7 @@ def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, dis
                 "known_interactors": len(interactors),
                 "degree": int(degree[idx]),
                 "known_interactor_genes": ";".join(interactors[:max_listed_interactors]),
+                "model_score": round(float(scores[idx, j]), 4) if scores is not None else None,
             })
     return rows
 

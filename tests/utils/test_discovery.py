@@ -142,3 +142,46 @@ def test_known_links_rows_lists_seed_genes_with_scores():
         {"disease": "Asthma", "category": "disease", "gene": "A", "gwas_score": 0.9},
         {"disease": "Asthma", "category": "disease", "gene": "B", "gwas_score": 0.8},
     ]
+
+
+# ---- optional model score matrix ----------------------------------------------
+
+def test_predict_links_ranks_by_model_scores_when_given():
+    import numpy as np
+
+    G, node_list, node_to_idx, z_norm = setup()
+    index = index_disease_genes(G, node_list)
+    scores = np.zeros((len(node_list), 1))
+    scores[node_to_idx["G"], 0] = 0.7
+    scores[node_to_idx["D"], 0] = 0.2
+    rows = predict_gene_disease_links(z_norm, node_list, node_to_idx, G, index, ["Asthma"], top_k=2, scores=scores)
+    assert [r["gene"] for r in rows] == ["G", "D"]          # enrichment alone would put D first
+    assert [r["model_score"] for r in rows] == [0.7, 0.2]
+    assert rows[1]["enrichment_score"] > 0 and rows[0]["enrichment_score"] == 0  # still reported
+
+
+def test_predict_links_breaks_model_score_ties_by_enrichment_then_similarity():
+    import numpy as np
+
+    G, node_list, node_to_idx, z_norm = setup()
+    index = index_disease_genes(G, node_list)
+    scores = np.zeros((len(node_list), 1))
+    rows = predict_gene_disease_links(z_norm, node_list, node_to_idx, G, index, ["Asthma"], top_k=2, scores=scores)
+    assert [r["gene"] for r in rows] == ["D", "G"]
+
+
+def test_predict_links_without_scores_has_empty_model_score():
+    G, node_list, node_to_idx, z_norm = setup()
+    index = index_disease_genes(G, node_list)
+    rows = predict_gene_disease_links(z_norm, node_list, node_to_idx, G, index, ["Asthma"], top_k=2)
+    assert all(r["model_score"] is None for r in rows)
+
+
+def test_predict_links_rejects_mismatched_scores_shape():
+    import numpy as np
+
+    G, node_list, node_to_idx, z_norm = setup()
+    index = index_disease_genes(G, node_list)
+    with pytest.raises(ValueError, match="scores"):
+        predict_gene_disease_links(z_norm, node_list, node_to_idx, G, index, ["Asthma", "Height"], top_k=2,
+                                   scores=np.zeros((len(node_list), 1)))

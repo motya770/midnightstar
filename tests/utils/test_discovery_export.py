@@ -89,3 +89,46 @@ def test_zip_bundle_contains_every_file_under_the_bundle_name(tmp_path):
     assert sorted(archive.namelist()) == sorted(
         f"discovery_x/{name}" for name in [PREDICTED_FILE, KNOWN_FILE, MANIFEST_FILE, README_FILE]
     )
+
+
+# ---- model scorer in the bundle -------------------------------------------------
+
+def test_predicted_columns_end_with_model_score_and_keep_existing_order():
+    from src.utils.discovery_export import PREDICTED_COLUMN_DOCS
+
+    assert PREDICTED_COLUMNS[:-1] == (
+        "disease", "category", "gene", "gene_description", "enrichment_score", "similarity",
+        "rank", "n_known_genes", "known_interactors", "degree", "known_interactor_genes",
+    )
+    assert PREDICTED_COLUMNS[-1] == "model_score"
+    assert "model_score" in PREDICTED_COLUMN_DOCS
+
+
+def test_manifest_records_scorer_and_hetero_method_text():
+    from src.utils.discovery_export import render_readme
+
+    links, known = sample_rows()
+    default = sample_manifest(links, known)
+    assert default["scorer"] == {"name": "enrichment", "checkpoint": None}
+    assert "enrichment" in default["method"].lower() and "heterogeneous" not in default["method"].lower()
+
+    hetero = build_manifest(
+        model_type="GNN", metrics={"auc_roc": 0.9}, checkpoint_path="/x/ckpt.pt", graph_name="g",
+        n_nodes=7, n_edges=5, embedding_dim=2, categories=["disease"], min_known_genes=2, top_k=50,
+        links=links, known=known, scorer="hetero-gnn", scorer_checkpoint="/x/hetero_gnn_1_checkpoint.pt",
+    )
+    assert hetero["scorer"] == {"name": "hetero-gnn", "checkpoint": "/x/hetero_gnn_1_checkpoint.pt"}
+    assert "heterogeneous" in hetero["method"].lower()
+    assert "Ranking scorer: hetero-gnn" in render_readme(hetero)
+    assert "Ranking scorer: enrichment" in render_readme(default)
+
+
+def test_bundle_csv_writes_model_score_column(tmp_path):
+    links, known = sample_rows()
+    links.append({**links[0], "gene": "E", "rank": 2, "model_score": 0.7})
+    manifest = sample_manifest(links, known)
+    bundle = write_discovery_bundle(tmp_path / "b", links, known, manifest)
+    df = pd.read_csv(bundle / PREDICTED_FILE)
+    assert list(df.columns) == list(PREDICTED_COLUMNS)
+    assert df.columns[-1] == "model_score"
+    assert pd.isna(df.loc[0, "model_score"]) and df.loc[1, "model_score"] == 0.7

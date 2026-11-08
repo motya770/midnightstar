@@ -19,6 +19,7 @@ README_FILE = "README.md"
 PREDICTED_COLUMNS = (
     "disease", "category", "gene", "gene_description", "enrichment_score", "similarity",
     "rank", "n_known_genes", "known_interactors", "degree", "known_interactor_genes",
+    "model_score",
 )
 KNOWN_COLUMNS = ("disease", "category", "gene", "gwas_score")
 
@@ -36,6 +37,8 @@ PREDICTED_COLUMN_DOCS = {
     "known_interactors": "How many known disease genes have a STRING interaction with the candidate",
     "degree": "Number of STRING interaction partners of the candidate",
     "known_interactor_genes": "Up to ten of those known interactors, separated by ';'",
+    "model_score": "Logit of the heterogeneous gene–disease model for this pair when that model produced the "
+                   "ranking (see the manifest's scorer); empty when enrichment ranked the candidates",
 }
 KNOWN_COLUMN_DOCS = {
     "disease": "GWAS Catalog trait name",
@@ -44,6 +47,17 @@ KNOWN_COLUMN_DOCS = {
     "gwas_score": "MidnightStar's association score derived from the GWAS Catalog entry",
 }
 
+ENRICHMENT_SCORER = "enrichment"
+HETERO_SCORER = "hetero-gnn"
+
+HETERO_METHOD_TEXT = (
+    "Candidates are ranked by a heterogeneous graph neural network trained on gene–disease "
+    "links: genes and GWAS traits are nodes, STRING protein interactions and GWAS gene–trait "
+    "associations are edges, and the model learns to score (gene, disease) pairs directly. "
+    "The model_score column is its logit; enrichment_score (hypergeometric enrichment of "
+    "known genes among a gene's STRING partners) and similarity are kept for reference and "
+    "break ties. Candidates are hypotheses for follow-up."
+)
 METHOD_TEXT = (
     "Candidates are ranked by guilt-by-association on the STRING protein interaction "
     "network: for each disease, every gene is scored by the hypergeometric enrichment of "
@@ -57,7 +71,9 @@ METHOD_TEXT = (
 
 
 def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes, n_edges,
-                   embedding_dim, categories, min_known_genes, top_k, links, known) -> dict:
+                   embedding_dim, categories, min_known_genes, top_k, links, known,
+                   scorer: str = ENRICHMENT_SCORER, scorer_checkpoint: str | None = None) -> dict:
+    """``scorer`` names what produced the ranking: "enrichment" (default) or "hetero-gnn"."""
     diseases = {row["disease"] for row in links} | {row["disease"] for row in known}
     return {
         "app": "MidnightStar",
@@ -69,6 +85,7 @@ def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes,
             "metrics": dict(metrics),
             "embedding_dim": embedding_dim,
         },
+        "scorer": {"name": scorer, "checkpoint": scorer_checkpoint},
         "graph": {"name": graph_name, "n_nodes": n_nodes, "n_edges": n_edges},
         "parameters": {
             "categories": list(categories),
@@ -81,7 +98,7 @@ def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes,
             "predicted_links": len(links),
             "known_links": len(known),
         },
-        "method": METHOD_TEXT,
+        "method": HETERO_METHOD_TEXT if scorer == HETERO_SCORER else METHOD_TEXT,
         "files": {
             PREDICTED_FILE: {
                 "description": "Predicted (new) gene–disease connections, one row per disease and candidate gene",
@@ -120,6 +137,8 @@ def render_readme(manifest: dict) -> str:
         "## Model",
         "",
         f"- Type: {model['type']}",
+        f"- Ranking scorer: {manifest.get('scorer', {}).get('name', ENRICHMENT_SCORER)}"
+        + (f" ({manifest['scorer']['checkpoint']})" if manifest.get('scorer', {}).get('checkpoint') else ""),
         f"- Test metrics: {metrics}",
         f"- Checkpoint: {model['checkpoint_path'] or 'not recorded'}",
         f"- Network: {graph['name'] or 'unnamed'} ({graph['n_nodes']} nodes, {graph['n_edges']} edges)",
