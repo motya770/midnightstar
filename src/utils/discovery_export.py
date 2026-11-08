@@ -37,8 +37,9 @@ PREDICTED_COLUMN_DOCS = {
     "known_interactors": "How many known disease genes have a STRING interaction with the candidate",
     "degree": "Number of STRING interaction partners of the candidate",
     "known_interactor_genes": "Up to ten of those known interactors, separated by ';'",
-    "model_score": "Logit of the heterogeneous gene–disease model for this pair when that model produced the "
-                   "ranking (see the manifest's scorer); empty when enrichment ranked the candidates",
+    "model_score": "Ranking score of the manifest's scorer when a model took part: the heterogeneous gene–disease "
+                   "model's logit (scorer hetero-gnn) or the sum of the per-disease z-scores of enrichment_score and "
+                   "that logit (scorer hetero-gnn+enrichment-z); empty when enrichment alone ranked the candidates",
 }
 KNOWN_COLUMN_DOCS = {
     "disease": "GWAS Catalog trait name",
@@ -49,6 +50,7 @@ KNOWN_COLUMN_DOCS = {
 
 ENRICHMENT_SCORER = "enrichment"
 HETERO_SCORER = "hetero-gnn"
+BLEND_SCORER = "hetero-gnn+enrichment-z"   # the benchmark's hetero+enrichment-z: z-score sum of enrichment and logit
 NO_PROTEIN_MODEL = "none"   # manifest model.type when the export was made without a protein–protein model
 
 # Method texts: one per scorer, each with and without a protein–protein model (which only supplies
@@ -67,6 +69,23 @@ HETERO_METHOD_TEXT_NO_PROTEIN = _HETERO_METHOD_HEAD + (
     "is kept for reference and breaks ties; no protein–protein model was loaded for this export, so "
     "the similarity column is empty. Candidates are hypotheses for follow-up."
 )
+_BLEND_METHOD_HEAD = (
+    "Candidates are ranked by the sum of two per-disease z-scores: the hypergeometric enrichment of "
+    "known GWAS genes among the gene's STRING partners (enrichment_score, -log10 p) and the logit of a "
+    "heterogeneous graph neural network trained on gene–disease links (genes and GWAS traits as nodes, "
+    "STRING interactions and GWAS associations as edges). The model_score column is that sum; "
+    "enrichment_score "
+)
+_BLEND_METHOD_TAIL = (
+    "On the held-out benchmark this blend recovered slightly more hidden disease genes in the top 50 "
+    "than enrichment alone, while the model alone recovered far fewer. Candidates are hypotheses for "
+    "follow-up."
+)
+BLEND_METHOD_TEXT = _BLEND_METHOD_HEAD + "and similarity are kept for reference and break ties. " + _BLEND_METHOD_TAIL
+BLEND_METHOD_TEXT_NO_PROTEIN = _BLEND_METHOD_HEAD + (
+    "is kept for reference and breaks ties; no protein–protein model was loaded for this export, so "
+    "the similarity column is empty. "
+) + _BLEND_METHOD_TAIL
 _ENRICHMENT_METHOD_HEAD = (
     "Candidates are ranked by guilt-by-association on the STRING protein interaction "
     "network: for each disease, every gene is scored by the hypergeometric enrichment of "
@@ -95,15 +114,19 @@ METHOD_TEXT_NO_PROTEIN = _ENRICHMENT_METHOD_HEAD + NO_PROTEIN_TIE_TEXT + _ENRICH
 def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes, n_edges,
                    embedding_dim, categories, min_known_genes, top_k, links, known,
                    scorer: str = ENRICHMENT_SCORER, scorer_checkpoint: str | None = None) -> dict:
-    """``scorer`` names what produced the ranking: "enrichment" (default) or "hetero-gnn".
+    """``scorer`` names what produced the ranking: "enrichment" (default), "hetero-gnn" or
+    "hetero-gnn+enrichment-z".
 
     ``model_type=None`` records an export made without a protein–protein model (no embeddings,
     no similarity tie-break): ``model.type`` becomes ``"none"`` and the method text says so."""
     diseases = {row["disease"] for row in links} | {row["disease"] for row in known}
+    no_protein = model_type is None
     if scorer == HETERO_SCORER:
-        method = HETERO_METHOD_TEXT if model_type is not None else HETERO_METHOD_TEXT_NO_PROTEIN
+        method = HETERO_METHOD_TEXT_NO_PROTEIN if no_protein else HETERO_METHOD_TEXT
+    elif scorer == BLEND_SCORER:
+        method = BLEND_METHOD_TEXT_NO_PROTEIN if no_protein else BLEND_METHOD_TEXT
     else:
-        method = METHOD_TEXT if model_type is not None else METHOD_TEXT_NO_PROTEIN
+        method = METHOD_TEXT_NO_PROTEIN if no_protein else METHOD_TEXT
     return {
         "app": "MidnightStar",
         "export": "gene-disease discovery",

@@ -6,6 +6,7 @@ import zipfile
 import pandas as pd
 
 from src.utils.discovery_export import (
+    BLEND_SCORER,
     HETERO_SCORER,
     KNOWN_FILE,
     MANIFEST_FILE,
@@ -157,3 +158,15 @@ def test_manifest_without_protein_model_says_so():
     readme = render_readme(manifest)
     assert "- Type: none (no protein–protein model loaded)" in readme and "- Test metrics: n/a" in readme
     assert "empty when no protein" in PREDICTED_COLUMN_DOCS["similarity"]
+
+
+def test_manifest_records_blend_scorer_method_text():
+    links, known = sample_rows()
+    kwargs = dict(metrics={"auc_roc": 0.9}, checkpoint_path="/x/ckpt.pt", graph_name="g", n_nodes=7, n_edges=5,
+                  embedding_dim=2, categories=["disease"], min_known_genes=2, top_k=50, links=links, known=known,
+                  scorer=BLEND_SCORER, scorer_checkpoint="/x/hetero.pt")
+    manifest = build_manifest(model_type="GNN", **kwargs)
+    assert manifest["scorer"] == {"name": "hetero-gnn+enrichment-z", "checkpoint": "/x/hetero.pt"}
+    assert "z-score" in manifest["method"] and "cosine similarity" not in manifest["method"]
+    assert "similarity column is empty" in build_manifest(model_type=None, **kwargs)["method"]
+    assert "z-score" in PREDICTED_COLUMN_DOCS["model_score"]
