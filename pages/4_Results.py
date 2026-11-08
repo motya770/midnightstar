@@ -40,7 +40,7 @@ from src.models.vae import GraphVAE
 
 st.title("📊 Predictions & Discovery")
 st.markdown(
-    "Use your trained model to predict **new gene-disease connections**, "
+    "Predict **new gene-disease connections** from the network alone or with a trained model, "
     "find genes with similar profiles, or check if two genes are likely to interact."
 )
 
@@ -156,10 +156,11 @@ if results is None and not session.get_no_protein_model():
     # Without a protein–protein model: enrichment and the gene–disease model need only the network.
     st.markdown("**Or predict without a protein–protein model**")
     hetero_count = len(find_hetero_checkpoints(checkpoint_dir))
+    hetero_note = ("" if not hetero_count
+                   else ", or by the gene–disease model checkpoint found," if hetero_count == 1
+                   else f", or by one of the {hetero_count} gene–disease model checkpoints found,")
     st.caption(
-        "The Predict Disease Genes tab and the export rank candidates by network enrichment"
-        + (f", or by one of the {hetero_count} gene–disease model checkpoint{'s' if hetero_count > 1 else ''} found,"
-           if hetero_count else "")
+        "The Predict Disease Genes tab and the export rank candidates by network enrichment" + hetero_note
         + " using only the network. Find Similar Genes and Check Gene Pair need a protein–protein model."
     )
     if graph is None:
@@ -569,7 +570,8 @@ st.markdown(
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_model_token = id(model) if model is not None else "no-protein-model"
+# Keys the export preview to the model, or, without one, to the network it was made from.
+_model_token = id(model) if model is not None else ("no-protein-model", session.get_graph_token())
 
 if not disease_index:
     st.info("No disease/GWAS data in the network, so there is nothing to export.")

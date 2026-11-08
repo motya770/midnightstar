@@ -243,7 +243,7 @@ protein profiles, say so instead of running.
 ## 🛠️ Development
 
 ```bash
-pytest                      # 176 tests, CPU only, about 15 s
+pytest                      # 180 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 

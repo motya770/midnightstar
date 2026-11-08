@@ -50,29 +50,46 @@ KNOWN_COLUMN_DOCS = {
 ENRICHMENT_SCORER = "enrichment"
 HETERO_SCORER = "hetero-gnn"
 NO_PROTEIN_MODEL = "none"   # manifest model.type when the export was made without a protein–protein model
-NO_PROTEIN_MODEL_TEXT = (
-    " No protein–protein model was loaded for this export, so the similarity column is empty and ties "
-    "in the ranking score keep the network's gene order."
-)
 
-HETERO_METHOD_TEXT = (
+# Method texts: one per scorer, each with and without a protein–protein model (which only supplies
+# the similarity tie-break).
+_HETERO_METHOD_HEAD = (
     "Candidates are ranked by a heterogeneous graph neural network trained on gene–disease "
     "links: genes and GWAS traits are nodes, STRING protein interactions and GWAS gene–trait "
     "associations are edges, and the model learns to score (gene, disease) pairs directly. "
     "The model_score column is its logit; enrichment_score (hypergeometric enrichment of "
-    "known genes among a gene's STRING partners) and similarity are kept for reference and "
-    "break ties. Candidates are hypotheses for follow-up."
+    "known genes among a gene's STRING partners) "
 )
-METHOD_TEXT = (
+HETERO_METHOD_TEXT = _HETERO_METHOD_HEAD + (
+    "and similarity are kept for reference and break ties. Candidates are hypotheses for follow-up."
+)
+HETERO_METHOD_TEXT_NO_PROTEIN = _HETERO_METHOD_HEAD + (
+    "is kept for reference and breaks ties; no protein–protein model was loaded for this export, so "
+    "the similarity column is empty. Candidates are hypotheses for follow-up."
+)
+_ENRICHMENT_METHOD_HEAD = (
     "Candidates are ranked by guilt-by-association on the STRING protein interaction "
     "network: for each disease, every gene is scored by the hypergeometric enrichment of "
     "known GWAS genes among its interaction partners (-log10 p, population = all genes in "
-    "the network). Ties, in particular genes with no known partner, are broken by cosine "
+    "the network). "
+)
+_SIMILARITY_TIE_TEXT = (
+    "Ties, in particular genes with no known partner, are broken by cosine "
     "similarity between the gene's embedding and the disease signature (the normalised "
     "mean embedding of the known genes) from a link-prediction model trained on the same "
-    "network. This is a network-based heuristic, not a supervised disease classifier, and "
+    "network. "
+)
+NO_PROTEIN_TIE_TEXT = (
+    "No protein–protein model was loaded for this export, so ties, in particular genes with "
+    "no known partner, are not broken (they keep the network's gene order) and the similarity "
+    "column is empty. "
+)
+_ENRICHMENT_METHOD_TAIL = (
+    "This is a network-based heuristic, not a supervised disease classifier, and "
     "candidates are hypotheses for follow-up."
 )
+METHOD_TEXT = _ENRICHMENT_METHOD_HEAD + _SIMILARITY_TIE_TEXT + _ENRICHMENT_METHOD_TAIL
+METHOD_TEXT_NO_PROTEIN = _ENRICHMENT_METHOD_HEAD + NO_PROTEIN_TIE_TEXT + _ENRICHMENT_METHOD_TAIL
 
 
 def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes, n_edges,
@@ -83,9 +100,10 @@ def build_manifest(*, model_type, metrics, checkpoint_path, graph_name, n_nodes,
     ``model_type=None`` records an export made without a protein–protein model (no embeddings,
     no similarity tie-break): ``model.type`` becomes ``"none"`` and the method text says so."""
     diseases = {row["disease"] for row in links} | {row["disease"] for row in known}
-    method = HETERO_METHOD_TEXT if scorer == HETERO_SCORER else METHOD_TEXT
-    if model_type is None:
-        method += NO_PROTEIN_MODEL_TEXT
+    if scorer == HETERO_SCORER:
+        method = HETERO_METHOD_TEXT if model_type is not None else HETERO_METHOD_TEXT_NO_PROTEIN
+    else:
+        method = METHOD_TEXT if model_type is not None else METHOD_TEXT_NO_PROTEIN
     return {
         "app": "MidnightStar",
         "export": "gene-disease discovery",

@@ -1,8 +1,8 @@
 """Gene–disease discovery helpers.
 
-Pure functions over a trained model's node embeddings and the NetworkX graph
-they were trained on. Used by the Results page and its export so the logic can
-be tested without Streamlit.
+Pure functions over the NetworkX graph and, when a protein–protein model is
+loaded, its node embeddings. Used by the Results page and its export so the
+logic can be tested without Streamlit.
 
 Candidates for a disease are ranked by guilt-by-association on the STRING
 network: the hypergeometric enrichment of known disease genes among a gene's

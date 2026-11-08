@@ -6,6 +6,7 @@ import zipfile
 import pandas as pd
 
 from src.utils.discovery_export import (
+    HETERO_SCORER,
     KNOWN_FILE,
     MANIFEST_FILE,
     NO_PROTEIN_MODEL,
@@ -146,7 +147,13 @@ def test_manifest_without_protein_model_says_so():
         links=links, known=known,
     )
     assert manifest["model"]["type"] == NO_PROTEIN_MODEL == "none"
-    assert "No protein–protein model" in manifest["method"]
+    assert "No protein–protein model" in manifest["method"] and "cosine similarity" not in manifest["method"]
+    hetero = build_manifest(
+        model_type=None, metrics={}, checkpoint_path=None, graph_name="full_s800_gwas",
+        n_nodes=7, n_edges=5, embedding_dim=None, categories=["disease"], min_known_genes=2, top_k=50,
+        links=links, known=known, scorer=HETERO_SCORER, scorer_checkpoint="/x/hetero.pt",
+    )
+    assert "similarity column is empty" in hetero["method"] and "and similarity are kept" not in hetero["method"]
     readme = render_readme(manifest)
     assert "- Type: none (no protein–protein model loaded)" in readme and "- Test metrics: n/a" in readme
     assert "empty when no protein" in PREDICTED_COLUMN_DOCS["similarity"]
