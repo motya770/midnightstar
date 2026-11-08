@@ -1,16 +1,20 @@
 # tests/models/test_hetero_pipeline.py
 import os
+import pickle
 
 import pytest
+import torch
 
 from src.data.bulk_datasets import BulkDatasetManager
 from src.models.hetero_pipeline import (
     benchmark_hetero,
     describe_hetero_params,
     hetero_model_kwargs,
+    hetero_training_payload,
     prepare_hetero_training,
     save_hetero_run,
     train_hetero,
+    train_hetero_from_payload,
 )
 from src.models.hetero_trainer import HeteroTrainConfig
 from src.utils.benchmark import HETERO_SCORERS, BenchmarkResult
@@ -105,3 +109,29 @@ def test_describe_hetero_params_matches_cli_format():
         "hidden=128, layers=2, decoder=dot, dropout=0.2, neg=4g+1t/uniform, lr=0.001, wd=1e-05, "
         "epochs=300, seed=42, holdout=benchmark")
     assert describe_hetero_params(kwargs, config, holdout=False, gpu="A100").endswith("holdout=no, gpu=A100")
+
+
+def test_payload_round_trip_reproduces_local_training():
+    G = make_graph()
+    prepared = prepare_hetero_training(G)
+    kwargs = hetero_model_kwargs(prepared.bundle, hidden=8)
+    config = HeteroTrainConfig(**CONFIG)
+    payload = pickle.loads(pickle.dumps(hetero_training_payload(prepared, kwargs, config)))
+    assert "device" not in payload["config"] and payload["split"]["hidden"] == prepared.split.hidden
+    remote = train_hetero_from_payload(payload)
+    local = train_hetero(prepared.bundle, prepared.index, prepared.split, kwargs, config)
+    remote_state = pickle.loads(remote["model_state_dict"])
+    assert set(remote_state) == set(local.model.state_dict())
+    assert all(torch.allclose(remote_state[k], v) for k, v in local.model.state_dict().items())
+    assert remote["metrics"]["epochs_run"] == 3 == remote["epochs_run"] and remote["device_used"] == "cpu"
+    assert remote["history"]["train_loss"] == local.history["train_loss"]
+
+
+def test_modal_hetero_entrypoint_runs_the_payload_on_cpu():
+    from src.models.modal_app import HETERO_TRAIN_FUNCTIONS, _do_train_hetero, collect_source_code
+    assert set(HETERO_TRAIN_FUNCTIONS) == {"T4", "A10G", "A100"}
+    prepared = prepare_hetero_training(make_graph())
+    payload = hetero_training_payload(prepared, hetero_model_kwargs(prepared.bundle, hidden=8), HeteroTrainConfig(**CONFIG))
+    result = _do_train_hetero(pickle.dumps(payload), collect_source_code())
+    assert set(result) >= {"model_state_dict", "history", "metrics", "epochs_run", "device_used"}
+    assert result["epochs_run"] == 3 and result["device_used"] in ("cpu", "cuda")

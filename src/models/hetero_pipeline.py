@@ -3,14 +3,17 @@
 ``prepare_hetero_training`` makes the benchmark hold-out and converts the graph with the hidden
 pairs removed; ``train_hetero`` trains a model on that bundle; ``benchmark_hetero`` scores it
 against enrichment on the hidden pairs; ``save_hetero_run`` writes the checkpoint and records the
-training run.
+training run. ``hetero_training_payload`` / ``train_hetero_from_payload`` carry the prepared data to
+another machine (a Modal GPU) and bring weights, history and metrics back, so a remote run leaves
+exactly what a local run leaves once it is benchmarked and saved here.
 """
 from __future__ import annotations
 
 import datetime
 import os
+import pickle
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import networkx as nx
 import numpy as np
@@ -185,3 +188,31 @@ def save_hetero_run(manager, *, model: HeteroGNNLinkPredictor, model_kwargs: dic
         )
     return HeteroSaved(path, run_id, model_name)
 
+
+# ---- remote training --------------------------------------------------------------------------------
+
+def hetero_training_payload(prepared: HeteroPrepared, model_kwargs: dict, config: HeteroTrainConfig) -> dict:
+    """Everything ``train_hetero_from_payload`` needs, as plain picklable objects (the device is chosen there)."""
+    payload_config = {k: v for k, v in asdict(config).items() if k != "device"}
+    return {
+        "bundle": prepared.bundle,
+        "index": prepared.index,
+        "split": prepared.split.to_dict() if prepared.split is not None else None,
+        "model_kwargs": dict(model_kwargs),
+        "config": payload_config,
+    }
+
+
+def train_hetero_from_payload(payload: dict, device: str = "cpu", on_epoch=None) -> dict:
+    """``train_hetero`` on a payload; returns the CPU state dict (pickled), history and metrics."""
+    config = HeteroTrainConfig(**payload["config"], device=device)
+    split = HoldoutSplit.from_dict(payload["split"]) if payload["split"] is not None else None
+    trained = train_hetero(payload["bundle"], payload["index"], split, payload["model_kwargs"], config,
+                           on_epoch=on_epoch)
+    return {
+        "model_state_dict": pickle.dumps(trained.model.state_dict()),
+        "history": trained.history,
+        "metrics": trained.metrics,
+        "epochs_run": trained.metrics["epochs_run"],
+        "device_used": device,
+    }
