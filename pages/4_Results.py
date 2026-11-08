@@ -183,16 +183,22 @@ disease_index = index_disease_genes(graph, node_list) if graph else {}
 # ---------------------------------------------------------------------------
 _CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".datasets", "trained_models")
 SCORER_ENRICHMENT_LABEL = "Network enrichment (default)"
+# The hetero model has not beaten enrichment on the held-out benchmark (README, "Held-out
+# disease-gene benchmark"), so it is offered as an experimental alternative, never as the default.
+SCORER_HETERO_NOTE = "(experimental, below enrichment on the benchmark)"
 _hetero_paths = list(reversed(find_hetero_checkpoints(_CHECKPOINT_DIR)))
 scorer_options = [SCORER_ENRICHMENT_LABEL] + [
-    f"Gene–disease model: {os.path.basename(p).replace('_checkpoint.pt', '')}" for p in _hetero_paths
+    f"Gene–disease model: {os.path.basename(p).replace('_checkpoint.pt', '')} {SCORER_HETERO_NOTE}"
+    for p in _hetero_paths
 ]
 _scorer_paths = dict(zip(scorer_options[1:], _hetero_paths))
 SCORER_HELP = (
     "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the "
     "disease's known genes (the validated default). **Gene–disease model** ranks by a heterogeneous graph "
-    "neural network trained on gene–disease links; compare both on the held-out benchmark "
-    "(scripts/benchmark_disease_genes.py) before trusting it."
+    "neural network trained on gene–disease links. On the held-out benchmark the current checkpoint "
+    "recovers fewer hidden disease genes than enrichment on its own (it only helps when combined with "
+    "enrichment, see the README), so treat its ranking as experimental and compare checkpoints with "
+    "scripts/benchmark_disease_genes.py before trusting one."
 )
 
 

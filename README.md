@@ -148,22 +148,77 @@ python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
     --checkpoint .datasets/trained_models/<run>_checkpoint.pt --json benchmark.json
 ```
 
-| Scorer (GNN checkpoint `gnn_20261030_012253`) | recall@50 | recall@200 | median rank | MRR |
-|---|---|---|---|---|
-| Enrichment (production ranking) | 0.042 | 0.083 | 5740 | 0.086 |
-| Centroid cosine, mean-centred embeddings | 0.022 | 0.063 | 5135 | 0.043 |
-| Centroid cosine, raw embeddings | 0.007 | 0.028 | 5580 | 0.012 |
+| Scorer | recall@50 | recall@200 | median rank | MRR | distinct genes in top-10 | max rank-1 |
+|---|---|---|---|---|---|---|
+| Enrichment (production ranking) | 0.042 | 0.083 | 5740 | 0.086 | 1470 | 6 |
+| Centroid cosine, mean-centred embeddings (`gnn_20261030_012253`) | 0.022 | 0.063 | 5135 | 0.043 | 662 | 13 |
+| Centroid cosine, raw embeddings (`gnn_20261030_012253`) | 0.007 | 0.028 | 5580 | 0.012 | 287 | 34 |
+| Hetero gene–disease model alone (`hetero_gnn_20261108_013654`) | 0.002 | 0.011 | 4252 | 0.003 | 982 | 10 |
+| Enrichment + hetero model, z-score sum (`hetero+enrichment-z`) | **0.046** | **0.092** | 4264 | **0.094** | 1457 | 7 |
+| Enrichment + hetero model, rank average (`hetero+enrichment`) | 0.035 | 0.085 | 4204 | 0.057 | 1349 | 3 |
+| Enrichment, hetero model for unscored genes (`enrichment>hetero`) | 0.042 | 0.083 | 4794 | 0.086 | 1480 | 6 |
+
+The last two columns measure hub concentration: how many distinct genes fill
+the 219 top-10 lists, and the most diseases any single gene ranks first for.
+Raw cosine is hub-dominated (287 genes, one of them first for 34 diseases); the
+hetero model is not (982 genes, none first for more than 10).
+
+The heterogeneous model's checkpoint (dot decoder, learning rate 1e-3,
+early-stopped at epoch 42 with 1 optimizer step per epoch, so undertrained)
+does not beat enrichment on its own, and **enrichment stays the default
+ranking**. Summed as z-scores with enrichment it lifts every metric
+(recall@50 0.042 → 0.046, MRR 0.086 → 0.094), so the combination is worth
+revisiting once a longer-trained checkpoint exists; the training command below
+reproduces the run that was stopped at epoch 283 of 1500 (loss 0.37, falling).
 
 The same machinery is available in code: `src.utils.benchmark.run_benchmark`
 accepts any function with the signature of `predict_gene_disease_links` (it is
 handed the masked index, so it cannot see the hidden genes) or a precomputed
 genes × diseases score matrix, and `make_holdout` returns the split so a model
-can be trained with exactly the same gene–disease pairs held out.
+can be trained with exactly the same gene–disease pairs held out. Every result
+also reports hub concentration: how many distinct genes fill the top-10 lists
+across diseases and the most diseases any one gene ranks first for.
+
+### 🧬 Heterogeneous gene–disease model
+
+The protein–protein models learn who interacts with whom, which is not the
+question the Predictions page asks. `scripts/train_hetero_disease_model.py`
+trains a model on the question itself: genes and **all** GWAS traits become
+nodes of one heterogeneous graph (`src/utils/hetero_graph_features.py`), STRING
+interactions and GWAS gene–trait associations become edges, and a
+HeteroConv/SAGE encoder with a dot-product decoder (`src/models/hetero_gnn.py`)
+is trained to score (gene, disease) pairs (`src/models/hetero_trainer.py`).
+Before training, the benchmark's hidden gene–disease pairs are removed from the
+graph, so the model is scored on pairs it never saw; the split is stored in the
+checkpoint and the benchmark CLI reuses it.
+
+```bash
+python scripts/train_hetero_disease_model.py --graph full_s800_gwas --lr 0.003 \
+    --epochs 1500 --eval-every 10 --patience 15 --json run.json
+python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
+    --hetero-checkpoint .datasets/trained_models/hetero_gnn_<stamp>_checkpoint.pt
+```
+
+Training is full-batch (one optimizer step per epoch, about a second on CPU at
+full size; Apple MPS was several times slower for this model), validates on a
+second seeded hold-out of known disease genes scored the benchmark way, and
+keeps the best epoch. Options cover
+the decoder (`dot`, `bilinear`, `mlp`), degree-aware negatives, and dropping
+traits with few genes; `--no-holdout` trains a production model on every known
+pair once the honest one has been validated.
+
+When a hetero checkpoint exists in `.datasets/trained_models`, the Predictions
+page offers **Ranking score: Network enrichment (default) / Gene–disease
+model** in the Predict Disease Genes tab and the export form; the model option
+is labelled *experimental, below enrichment on the benchmark* until a checkpoint
+beats enrichment. The export's `manifest.json` names the scorer that produced
+the bundle, and the predicted links gain a trailing `model_score` column (empty
+when enrichment ranked); the existing columns are unchanged.
 
 ## 🛠️ Development
 
 ```bash
-pytest                      # 109 tests, CPU only, about 15 s
+pytest                      # 155 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 
@@ -180,9 +235,10 @@ and matches the full-batch gradient, and the RWSE cache is deterministic.
 app.py                     Streamlit entry point and navigation
 pages/                     One file per page (download, search, explorer, training, predictions, data browsers)
 src/data/                  Bulk downloaders, SQLite manager, live API clients (GWAS, GTEx, HPA, STRING, AlphaFold, mygene)
-src/models/                GNN, Graph Transformer, Graph VAE, Trainer, Modal app
-src/utils/                 NetworkX -> PyG conversion, graph builder, discovery scoring and benchmark, session helpers, text explainer
-scripts/                   Command-line tools (held-out disease-gene benchmark)
+src/models/                GNN, Graph Transformer, Graph VAE, Trainer, Modal app; hetero gene–disease model and trainer
+src/utils/                 NetworkX -> PyG conversion (homogeneous and heterogeneous), graph builder, discovery scoring,
+                           benchmark, hetero checkpoint scorer, session helpers, text explainer
+scripts/                   Command-line tools: held-out disease-gene benchmark, hetero gene–disease model training
 tests/                     pytest suite
 docs/                      Graph Transformer tutorial, design specs, write-ups
 lib/                       Vendored JS assets for the network visualisation

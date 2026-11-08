@@ -88,7 +88,9 @@ Hidden size default 128.
 - `build_manifest(..., scorer="enrichment", scorer_checkpoint=None)`: the manifest's `scorer` block and method text name which scorer produced the bundle; the README in the bundle shows it.
 - Results page: when a hetero checkpoint exists in `.datasets/trained_models`, the Predict Disease Genes tab and the export form offer **Ranking score: Network enrichment (default) / Hetero gene–disease model**. The Training page gets no new mode in this revision; training is the CLI.
 
-If the model does not beat enrichment, the scorer stays available in the CLI and the benchmark only.
+If the model does not beat enrichment, enrichment stays the default: the Results page still offers the
+checkpoint, but under a label marked *experimental, below enrichment on the benchmark*, and the combination
+scorers stay in the CLI and the benchmark only (Section 8 records the outcome).
 
 ---
 
@@ -115,3 +117,40 @@ If the model does not beat enrichment, the scorer stays available in the CLI and
 | `scripts/benchmark_disease_genes.py` | hetero and combination scorers, hub concentration |
 | `src/utils/benchmark.py` | combination helpers, hub concentration |
 | `src/utils/discovery.py`, `src/utils/discovery_export.py`, `pages/4_Results.py` | optional model scorer, appended column, manifest scorer |
+
+## Section 8: Outcome (2026-11-08)
+
+Everything in Sections 1–7 was built and is covered by tests (155 in the suite).
+One checkpoint was trained and benchmarked on the benchmark's own hold-out
+(`full_s800_gwas`, 219 diseases, 2,648 hidden genes, the hidden pairs removed
+from the training graph): `hetero_gnn_20261108_013654`, dot decoder, hidden
+128, learning rate 1e-3, uniform negatives, early-stopped at epoch 42 (best
+epoch 21, one full-batch optimizer step per epoch, so undertrained).
+
+| scorer | recall@50 | recall@200 | median rank | MRR | distinct top-10 | max rank-1 |
+|---|---|---|---|---|---|---|
+| enrichment (production) | 0.0415 | 0.0827 | 5740 | 0.0859 | 1470 | 6 |
+| hetero model alone | 0.0023 | 0.0113 | 4252 | 0.0034 | 982 | 10 |
+| hetero + enrichment, z-score sum | 0.0461 | 0.0921 | 4264 | 0.0936 | 1457 | 7 |
+| hetero + enrichment, rank average | 0.0347 | 0.0853 | 4204 | 0.0568 | 1349 | 3 |
+| enrichment, hetero for unscored genes | 0.0415 | 0.0827 | 4794 | 0.0857 | 1480 | 6 |
+
+Decision, by the acceptance rule in the Goal: the model alone does not beat
+enrichment (recall@50 0.042 / MRR 0.086), so **enrichment stays the default
+scorer**. The Section 6 integration shipped anyway as an opt-in: the Results
+page offers the checkpoint under a label marked *experimental, below enrichment
+on the benchmark*, the export appends `model_score` and names the scorer in the
+manifest, and the existing bundle columns are unchanged. The z-score
+combination of enrichment and model score beats enrichment on every metric and
+is available in the benchmark CLI (`hetero+enrichment-z`), not in the UI.
+
+Observations: the model shows no hub collapse (982 distinct genes in the 219
+top-10 lists versus 287 for raw cosine), its median rank is the best of all
+scorers (it ranks genes with no STRING partner, which enrichment cannot), but
+its top of the list is weak. A second run with learning rate 3e-3, validation
+every 10 epochs and patience 15 evaluations had reached epoch 283 of 1500 with
+loss 0.37 (run 1 stopped at 0.49, the trivial all-negative loss is 0.45),
+validation MRR 0.008 and validation recall@50 0.026 when training was stopped
+at the user's request; no checkpoint was saved from it. The README's training
+command reproduces that run. Degree-aware negatives and the bilinear/MLP
+decoders were implemented but not evaluated at full size.
