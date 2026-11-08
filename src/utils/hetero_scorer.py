@@ -21,7 +21,8 @@ import numpy as np
 import torch
 
 from src.models.hetero_gnn import HeteroGNNLinkPredictor
-from src.utils.benchmark import HoldoutSplit
+from src.utils.benchmark import HoldoutSplit, zscore_sum
+from src.utils.discovery import enrichment_matrix
 from src.utils.hetero_graph_features import HeteroBundle, nx_to_hetero_data
 
 HETERO_MODEL_CLASS = "HeteroGNNLinkPredictor"
@@ -147,6 +148,18 @@ def align_gene_rows(gene_matrix: np.ndarray, gene_list, node_list) -> np.ndarray
 def hetero_score_matrix(checkpoint: dict, graph, diseases, *, honest: bool = False, device: str = "cpu") -> np.ndarray:
     """``score_from_encoding(hetero_encode(...))`` in one call, for the benchmark CLI."""
     return score_from_encoding(hetero_encode(checkpoint, graph, honest=honest, device=device), diseases)
+
+
+def blend_with_enrichment(model_scores, graph, node_list, node_to_idx, index, diseases) -> np.ndarray:
+    """The benchmark's ``hetero+enrichment-z`` scorer for production: the sum of per-disease z-scores
+    of network enrichment and the model's logit, (n_nodes × n_diseases) in ``node_list`` order.
+
+    ``model_scores`` is ``score_from_encoding``'s matrix for the same ``diseases``. A disease the
+    model has no trait node for has a constant logit column, which contributes nothing, so that
+    disease is ranked by enrichment alone."""
+    diseases = list(diseases)
+    enrichment = enrichment_matrix(graph, node_list, node_to_idx, index, diseases)
+    return zscore_sum(enrichment, np.asarray(model_scores, dtype=float))
 
 
 def is_hetero_checkpoint_path(path) -> bool:

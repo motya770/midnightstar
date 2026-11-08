@@ -152,3 +152,21 @@ def test_align_gene_rows_places_gene_scores_on_the_full_node_list():
     assert aligned[node_list.index("A")].tolist() == [1.0, 10.0]
     assert aligned[node_list.index("B")].tolist() == [2.0, 20.0]
     assert aligned[node_list.index("DIS:1")].tolist() == [0.0, 0.0]
+
+
+def test_blend_with_enrichment_is_the_benchmark_zscore_sum_and_keeps_enrichment_where_the_model_is_flat():
+    from src.utils.benchmark import zscore_sum
+    from src.utils.discovery import enrichment_matrix
+    from src.utils.hetero_scorer import blend_with_enrichment
+
+    G = make_graph()
+    node_list = sorted(G.nodes())
+    node_to_idx = {n: i for i, n in enumerate(node_list)}
+    index = index_disease_genes(G, node_list)
+    model = np.zeros((len(node_list), 2))
+    model[node_to_idx[GENES[20]], 0] = 5.0
+    enrichment = enrichment_matrix(G, node_list, node_to_idx, index, ["Asthma", "BMI"])
+    blend = blend_with_enrichment(model, G, node_list, node_to_idx, index, ["Asthma", "BMI"])
+    np.testing.assert_allclose(blend, zscore_sum(enrichment, model))
+    assert blend[:, 0].argmax() == node_to_idx[GENES[20]]                 # the model's one strong gene wins Asthma
+    assert np.corrcoef(blend[:, 1], enrichment[:, 1])[0, 1] > 0.999       # flat model column: BMI keeps enrichment's order
