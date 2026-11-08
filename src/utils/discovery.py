@@ -107,8 +107,12 @@ def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, dis
     With ``scores``, a (len(node_list), len(diseases)) matrix from a trained
     gene–disease model, that score ranks first and enrichment then similarity
     break ties; each row then carries it as ``model_score`` (None otherwise).
+
+    ``z_norm`` may be None (no protein–protein model loaded): ``similarity`` is
+    then None in every row and ties keep ``node_list`` order.
     """
-    z_norm = z_norm.detach().cpu()
+    if z_norm is not None:
+        z_norm = z_norm.detach().cpu()
     diseases = list(diseases)
     if scores is not None:
         scores = scores.detach().cpu().numpy() if isinstance(scores, torch.Tensor) else np.asarray(scores, dtype=float)
@@ -129,15 +133,17 @@ def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, dis
         known_idx = np.array([node_to_idx[g] for g in known])
         enrichment = enrichment_all[:, j]
 
-        signature = F.normalize(z_norm[torch.from_numpy(known_idx)].mean(dim=0, keepdim=True), dim=-1)
-        similarity = (z_norm @ signature.T).squeeze(1).numpy()
+        similarity = None
+        if z_norm is not None:
+            signature = F.normalize(z_norm[torch.from_numpy(known_idx)].mean(dim=0, keepdim=True), dim=-1)
+            similarity = (z_norm @ signature.T).squeeze(1).numpy()
 
         allowed = gene_mask.copy()
         allowed[known_idx] = False
         candidates = np.flatnonzero(allowed)
         if candidates.size == 0:
             continue
-        keys = [-similarity[candidates], -enrichment[candidates]]
+        keys = ([-similarity[candidates]] if similarity is not None else []) + [-enrichment[candidates]]
         if scores is not None:
             keys.append(-scores[candidates, j])
         order = candidates[np.lexsort(keys)][:top_k]
@@ -152,7 +158,7 @@ def predict_gene_disease_links(z_norm, node_list, node_to_idx, graph, index, dis
                 "gene": gene,
                 "gene_description": graph.nodes[gene].get("name", ""),
                 "enrichment_score": round(float(enrichment[idx]), 4),
-                "similarity": round(float(similarity[idx]), 4),
+                "similarity": round(float(similarity[idx]), 4) if similarity is not None else None,
                 "rank": rank,
                 "n_known_genes": len(known),
                 "known_interactors": len(interactors),

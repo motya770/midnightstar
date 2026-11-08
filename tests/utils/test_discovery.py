@@ -185,3 +185,24 @@ def test_predict_links_rejects_mismatched_scores_shape():
     with pytest.raises(ValueError, match="scores"):
         predict_gene_disease_links(z_norm, node_list, node_to_idx, G, index, ["Asthma", "Height"], top_k=2,
                                    scores=np.zeros((len(node_list), 1)))
+
+
+def test_predict_links_without_embeddings_ranks_by_enrichment_and_leaves_similarity_empty():
+    G, node_list, node_to_idx, _ = setup()
+    index = index_disease_genes(G, node_list)
+    rows = predict_gene_disease_links(None, node_list, node_to_idx, G, index, ["Asthma"], top_k=3)
+    assert [r["gene"] for r in rows] == ["D", "C", "E"]      # D has the known partner; ties keep node order
+    assert all(r["similarity"] is None for r in rows)
+
+
+def test_predict_links_without_embeddings_still_ranks_by_model_scores():
+    import numpy as np
+
+    G, node_list, node_to_idx, _ = setup()
+    index = index_disease_genes(G, node_list)
+    scores = np.zeros((len(node_list), 1))
+    scores[node_to_idx["G"], 0] = 0.7
+    scores[node_to_idx["D"], 0] = 0.2
+    rows = predict_gene_disease_links(None, node_list, node_to_idx, G, index, ["Asthma"], top_k=2, scores=scores)
+    assert [r["gene"] for r in rows] == ["G", "D"]
+    assert [r["model_score"] for r in rows] == [0.7, 0.2] and all(r["similarity"] is None for r in rows)
