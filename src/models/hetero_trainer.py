@@ -37,13 +37,16 @@ class HeteroTrainConfig:
     val_fraction: float = 0.1
     val_seed: int = 1
     early_stopping: bool = True
-    patience: int = 20
+    patience: int = 20          # counted in evaluations, not epochs
+    eval_every: int = 1         # validate every N epochs (the last epoch is always evaluated)
     seed: int = 42
     device: str = "cpu"
 
     def __post_init__(self):
         if not 0 < self.supervision_ratio < 1:
             raise ValueError("supervision_ratio must be strictly between 0 and 1")
+        if self.eval_every < 1:
+            raise ValueError("eval_every must be at least 1")
         if self.neg_sampling not in NEG_SAMPLING:
             raise ValueError(f"neg_sampling must be one of {NEG_SAMPLING}")
         if self.neg_gene < 0 or self.neg_trait < 0:
@@ -221,18 +224,26 @@ class HeteroTrainer:
               f"{self._train_edges.size(1)} training gene–trait edges, {self._val_pairs.size(1)} validation pairs "
               f"({len(self.val_split.diseases)} diseases), device {self.device}")
 
-        history = {"train_loss": [], "val_mrr": [], "val_recall50": [], "val_auc": [], "best_epoch": 0}
+        history = {"train_loss": [], "val_mrr": [], "val_recall50": [], "val_auc": [], "eval_epochs": [],
+                   "best_epoch": 0}
         best, best_state, patience = -1.0, None, 0
+        val = {"val_mrr": 0.0, "val_recall50": 0.0, "val_auc": 0.5}
         pbar = tqdm(range(cfg.epochs), desc="Epochs", unit="epoch")
         for epoch in pbar:
             loss = self._train_step()
-            val = self._validate()
             history["train_loss"].append(loss)
+            evaluate = (epoch + 1) % cfg.eval_every == 0 or epoch == cfg.epochs - 1
+            if evaluate:
+                val = self._validate()
+                history["eval_epochs"].append(epoch)
+            # Carry the latest validation values forward so every list has one entry per epoch.
             for key in ("val_mrr", "val_recall50", "val_auc"):
                 history[key].append(val[key])
             pbar.set_postfix(loss=f"{loss:.4f}", val_mrr=f"{val['val_mrr']:.4f}", val_r50=f"{val['val_recall50']:.3f}")
             if on_epoch:
                 on_epoch(epoch, loss, val["val_mrr"])
+            if not evaluate:
+                continue
             if val["val_mrr"] > best:
                 best, patience = val["val_mrr"], 0
                 history["best_epoch"] = epoch

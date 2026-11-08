@@ -316,3 +316,14 @@ def test_reference_scorers_accepts_hetero_matrix_names():
     assert all(isinstance(r, BenchmarkResult) for r in results.values())
     with pytest.raises(ValueError, match="hetero"):
         reference_scorers(["hetero"], G, node_list, node_to_idx, index, split)
+
+
+def test_reference_enrichment_without_embeddings_uses_average_rank_ties():
+    from src.utils.benchmark import reference_scorers
+
+    G, node_list, node_to_idx, index, split = setup()
+    G.remove_edges_from(list(G.edges()))   # no STRING partners: every candidate ties at enrichment 0
+    result = reference_scorers(["enrichment"], G, node_list, node_to_idx, index, split)["enrichment"]
+    hidden = split.hidden["Asthma"][0]
+    n_candidates = len(GENES) - len(split.visible["Asthma"])
+    assert result.hidden_ranks["Asthma"][hidden] == pytest.approx((1 + n_candidates) / 2)

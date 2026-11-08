@@ -49,7 +49,8 @@ def parse_args(argv=None):
     parser.add_argument("--neg-sampling", choices=NEG_SAMPLING, default="uniform")
     parser.add_argument("--min-trait-genes", type=int, default=1)
     parser.add_argument("--val-fraction", type=float, default=0.1)
-    parser.add_argument("--patience", type=int, default=20)
+    parser.add_argument("--patience", type=int, default=20, help="evaluations without improvement before stopping")
+    parser.add_argument("--eval-every", type=int, default=1, help="validate every N epochs")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cpu", help="cpu or mps")
     parser.add_argument("--no-holdout", action="store_true", help="train on all pairs (production model, no benchmark)")
@@ -87,8 +88,8 @@ def main(argv=None) -> int:
     config = HeteroTrainConfig(epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
                                supervision_ratio=args.supervision_ratio, neg_gene=args.neg_gene,
                                neg_trait=args.neg_trait, neg_sampling=args.neg_sampling,
-                               val_fraction=args.val_fraction, patience=args.patience, seed=args.seed,
-                               device=args.device)
+                               val_fraction=args.val_fraction, patience=args.patience, eval_every=args.eval_every,
+                               seed=args.seed, device=args.device)
     print(f"model: {sum(p.numel() for p in model.parameters()):,} parameters, decoder={args.decoder}; config: {config}")
 
     started = time.time()

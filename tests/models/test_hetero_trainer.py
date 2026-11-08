@@ -134,3 +134,24 @@ def test_degree_aware_negatives_prefer_high_degree_genes():
     busy = bundle.node_to_idx["G10"]                           # in both Asthma and BMI
     assert counts[isolated].sum() == 0
     assert counts[busy] > 0
+
+
+def test_eval_every_validates_on_a_schedule_and_counts_patience_in_evaluations():
+    G, index, split, bundle, trainer = setup(epochs=7, eval_every=3, early_stopping=False)
+    calls = []
+    original = trainer._validate
+
+    def counting_validate():
+        calls.append(len(trainer_history["train_loss"]) if trainer_history else None)
+        return original()
+
+    trainer_history = None
+    trainer._validate = counting_validate
+    history = trainer.train(bundle, index, split, G)
+    # epochs 0..6 with eval_every=3: evaluated after epochs 2, 5 and the final epoch 6
+    assert history["eval_epochs"] == [2, 5, 6]
+    assert len(history["val_mrr"]) == 7                      # one entry per epoch, carried forward between evaluations
+    assert history["val_mrr"][2] == history["val_mrr"][3] == history["val_mrr"][4]
+    assert history["val_mrr"][0] == history["val_mrr"][1] == 0.0  # nothing evaluated yet
+    assert history["best_epoch"] in history["eval_epochs"]
+    assert len(calls) == 3

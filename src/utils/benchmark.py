@@ -331,9 +331,16 @@ def reference_scorers(names, graph, node_list, node_to_idx, index: dict[str, dic
     results = {}
     for name in names:
         if name == "enrichment":
-            z_norm = F.normalize(z.detach().cpu().float(), dim=-1) if z is not None else torch.zeros(len(node_list), 1)
-            results[name] = run_benchmark(predict_gene_disease_links, graph, node_list, node_to_idx, index, split,
-                                          z_norm=z_norm)
+            if z is not None:
+                # the production path: enrichment with cosine similarity breaking ties
+                z_norm = F.normalize(z.detach().cpu().float(), dim=-1)
+                results[name] = run_benchmark(predict_gene_disease_links, graph, node_list, node_to_idx, index,
+                                              split, z_norm=z_norm)
+            else:
+                # no embeddings to break ties with: average ranks instead of index order
+                if enrichment is None:
+                    enrichment = enrichment_matrix(graph, node_list, node_to_idx, masked, split.diseases)
+                results[name] = run_benchmark(enrichment, graph, node_list, node_to_idx, index, split)
             continue
         if name in EMBEDDING_SCORERS:
             matrix = centroid_cosine_matrix(z, node_list, node_to_idx, masked, split.diseases,
