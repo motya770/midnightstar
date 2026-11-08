@@ -83,9 +83,13 @@ cannot produce an empty test split.
 | GNN (default) | GraphSAGE layers | Fast; good baseline |
 | Graph Transformer | Pre-norm `TransformerConv` blocks with feed-forward paths | Uses the STRING evidence channels as edge features, optional random-walk positional encoding (RWSE), AdamW with warmup |
 | Graph VAE | GraphSAGE encoder with a Gaussian latent space | KL-regularised; useful for similarity search |
+| Hetero GNN (gene–disease) | HeteroConv/SAGE over genes **and** GWAS traits | Scores (gene, disease) pairs directly; benchmarked against network enrichment; see the hetero section below |
 
-All three score a pair as the dot product of the two node embeddings and are
-trained with binary cross-entropy on logits.
+The three protein–protein models score a pair as the dot product of the two
+node embeddings and are trained with binary cross-entropy on logits. The
+Hetero GNN has its own settings (decoder, negatives, minimum genes per trait,
+benchmark hold-out) and its own results panel; it runs on the CPU, the Mac's
+GPU or a Modal GPU like the others.
 
 **Training controls.** Epochs, learning rate, early stopping (restores the
 best-validation weights), random seed (same seed means the same split,
@@ -115,13 +119,21 @@ page can reload any checkpoint.
 ## 🔍 Interpreting predictions
 
 The training objective is protein–protein link prediction on the STRING
-network. The **Predict Disease Genes** tab ranks genes by guilt-by-association:
-the hypergeometric enrichment of the trait's known genes among a gene's STRING
-interaction partners, with cosine similarity of the learned embeddings to the
-known genes' mean embedding breaking ties. In a held-out check that hides 20 %
-of each trait's known genes, this recovers them about six times more often
-than ranking by embedding similarity alone, which mostly surfaces hub genes.
-It is a network heuristic, not a supervised disease classifier. The **Export
+network. The **Predict Disease Genes** tab ranks genes by **trait
+co-association** by default: the gene's GWAS associations with the up to 20
+traits whose gene sets are most similar to the disease, weighted by that
+similarity.
+It needs no network and no model, lists the traits behind each candidate, and
+in a held-out check that hides 20 % of each trait's known genes it recovers
+them six times more often than **network enrichment** (the hypergeometric
+enrichment of the trait's known genes among a gene's STRING partners, the
+default until 2026-11-08 and still offered under *Ranking score*; see the
+benchmark below for the caveat on alias traits), which in turn recovers them
+about six times more often than the raw embedding-similarity ranking the app
+started with (hub-prone; mean-centring it closes only half of that gap). Enrichment breaks ties in the
+co-association ranking, and cosine similarity of the learned embeddings breaks
+the remaining ones when a protein–protein model is loaded. Both are
+heuristics, not supervised disease classifiers. The **Export
 discoveries** section at the bottom of the page writes the full ranking for
 every trait as a CSV bundle with a manifest, ready to hand to Claude Science
 or any other tool. A heterogeneous gene–disease graph that trains on disease
@@ -132,10 +144,153 @@ The Transformer's positional encoding is a randomised estimate; it is
 deterministic for a given graph, but raising **Position encoding accuracy**
 (the number of probes) reduces its noise at the cost of preprocessing time.
 
+### 📏 Held-out disease-gene benchmark
+
+`scripts/benchmark_disease_genes.py` measures how useful a scorer is for
+disease-gene ranking, independently of the protein–protein AUC that training
+reports. For every trait of category *disease* with at least 10 known GWAS
+genes (219 on `full_s800_gwas`), it hides 20 % of the known genes with a fixed
+seed, scores every gene from the remaining 80 %, and reports where the hidden
+genes land among all candidate genes: recall@50, recall@200, median rank and
+MRR (mean over diseases of the reciprocal rank of the best-ranked hidden
+gene). Chance recall@50 is about 0.0025.
+
+```bash
+python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
+    --checkpoint .datasets/trained_models/<run>_checkpoint.pt --json benchmark.json
+```
+
+| Scorer | recall@50 | recall@200 | median rank | MRR | distinct genes in top-10 | max rank-1 |
+|---|---|---|---|---|---|---|
+| Enrichment (the default ranking until 2026-11-08) | 0.042 | 0.083 | 5740 | 0.086 | 1470 | 6 |
+| Enrichment without a protein model (no similarity tie-break, ties averaged) | 0.042 | 0.083 | 10586 | 0.085 | 1480 | 6 |
+| Trait co-association (`coassociation`, the production default) | **0.260** | **0.403** | 681 | **0.479** | 1234 | 7 |
+| Trait co-association, strict (`coassociation-strict`) | 0.193 | 0.298 | 2411 | 0.380 | 1186 | 9 |
+| Centroid cosine, mean-centred embeddings (`gnn_20261030_012253`) | 0.022 | 0.063 | 5135 | 0.043 | 662 | 13 |
+| Centroid cosine, raw embeddings (`gnn_20261030_012253`) | 0.007 | 0.028 | 5580 | 0.012 | 287 | 34 |
+| Hetero gene–disease model alone (`hetero_gnn_20261108_013654`) | 0.002 | 0.011 | 4252 | 0.003 | 982 | 10 |
+| Enrichment + hetero model, z-score sum (`hetero+enrichment-z`) | 0.046 | 0.092 | 4264 | 0.094 | 1457 | 7 |
+| Enrichment + hetero model, rank average (`hetero+enrichment`) | 0.035 | 0.085 | 4204 | 0.057 | 1349 | 3 |
+| Enrichment, hetero model for unscored genes (`enrichment>hetero`) | 0.042 | 0.083 | 4794 | 0.086 | 1480 | 6 |
+
+The last two columns measure hub concentration: how many distinct genes fill
+the 219 top-10 lists, and the most diseases any single gene ranks first for.
+Raw cosine is hub-dominated (287 genes, one of them first for 34 diseases); the
+hetero model is not (982 genes, none first for more than 10). One caveat on the
+cosine rows: the protein–protein checkpoint takes GWAS trait tokens as input
+features and is encoded on the full graph, so those embeddings have seen the
+hidden associations; the cosine baselines are optimistic and still lose.
+Enrichment and the hetero model only see the visible associations.
+
+**Trait co-association** (added 2026-11-08) does not use the network at all:
+it finds the 20 GWAS traits whose gene sets are most similar to the disease
+(cosine similarity of the log1p-weighted gene × trait columns, the disease's
+own column excluded) and scores each gene by the similarity-weighted sum of
+its associations with those traits, with enrichment breaking ties. It
+recovers six times as many hidden genes in the top 50 as enrichment, with no
+hub genes. Part of the gain comes from GWAS Catalog alias traits ("diabetes
+mellitus" next to "type 2 diabetes mellitus"): the strict row drops every
+trait that shares a word with the disease name and still recovers 19 %.
+Near-duplicate traits under a different name are not what drives the number:
+no benchmark disease keeps a trait with cosine similarity above 0.9 to it, and
+dropping every trait above 0.8 (nine diseases) moves recall@50 from 0.260 to
+0.258 (strict: 0.193 to 0.191). Adding STRING signals to co-association (smoothing over partners, z-score
+sums or rank averages with enrichment) did not improve on it. The two
+co-association rows and the second enrichment row were measured without
+embeddings, so genes tied on every score share their average rank (which is
+why that enrichment row's median rank is 10586, not 5740): compare the
+co-association rows with it; the design is in
+`docs/superpowers/specs/2026-11-08-trait-coassociation-scorer-design.md`.
+
+The heterogeneous model's checkpoint (dot decoder, learning rate 1e-3,
+early-stopped at epoch 42 with 1 optimizer step per epoch, so undertrained)
+does not beat enrichment on its own (and **enrichment stayed the default
+ranking** until trait co-association replaced it on 2026-11-08). Summed as z-scores with enrichment it lifts every metric
+(recall@50 0.042 → 0.046, MRR 0.086 → 0.094), so the combination is worth
+revisiting once a longer-trained checkpoint exists; the training command below
+reproduces the run that was stopped at epoch 283 of 1500 (loss 0.37, falling).
+
+The same machinery is available in code: `src.utils.benchmark.run_benchmark`
+accepts any function with the signature of `predict_gene_disease_links` (it is
+handed the masked index, so it cannot see the hidden genes) or a precomputed
+genes × diseases score matrix, and `make_holdout` returns the split so a model
+can be trained with exactly the same gene–disease pairs held out. Every result
+also reports hub concentration: how many distinct genes fill the top-10 lists
+across diseases and the most diseases any one gene ranks first for.
+
+### 🧬 Heterogeneous gene–disease model
+
+The protein–protein models learn who interacts with whom, which is not the
+question the Predictions page asks. `scripts/train_hetero_disease_model.py`
+trains a model on the question itself: genes and **all** GWAS traits become
+nodes of one heterogeneous graph (`src/utils/hetero_graph_features.py`), STRING
+interactions and GWAS gene–trait associations become edges, and a
+HeteroConv/SAGE encoder with a dot-product decoder (`src/models/hetero_gnn.py`)
+is trained to score (gene, disease) pairs (`src/models/hetero_trainer.py`).
+Before training, the benchmark's hidden gene–disease pairs are removed from the
+graph, so the model is scored on pairs it never saw; the split is stored in the
+checkpoint and the benchmark CLI reuses it.
+
+```bash
+python scripts/train_hetero_disease_model.py --graph full_s800_gwas --lr 0.003 \
+    --epochs 1500 --eval-every 10 --patience 15 --json run.json
+python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
+    --hetero-checkpoint .datasets/trained_models/hetero_gnn_<stamp>_checkpoint.pt
+```
+
+The **Train Model** page offers the same pipeline as *Hetero GNN (gene–disease)*:
+pick a network, set the model and hold-out options, and train on this
+computer's CPU, the Mac's GPU or a Modal cloud GPU (T4, A10G or A100). The
+page shows the validation metrics, the benchmark table against enrichment,
+the checkpoint path and the run number; the checkpoint then appears on the
+Predictions page under *Ranking score*. The CLI and the page share
+`src/models/hetero_pipeline.py`, so they produce the same checkpoint.
+
+Training is full-batch (one optimizer step per epoch, about a second on CPU at
+full size; Apple MPS was several times slower for this model), validates on a
+second seeded hold-out of known disease genes scored the benchmark way, and
+keeps the best epoch. Options cover
+the decoder (`dot`, `bilinear`, `mlp`), degree-aware negatives, and dropping
+traits with few genes; `--no-holdout` skips the benchmark hold-out for a
+production model once the honest one has been validated (a 10 % validation
+hold-out of disease genes still drives early stopping).
+
+The Predictions page offers **Ranking score: Trait co-association (default) /
+Trait co-association, strict / Network enrichment** in the Predict Disease
+Genes tab and the export form and, when a hetero checkpoint exists in
+`.datasets/trained_models`, **Enrichment + gene–disease model / Gene–disease
+model** as well. Trait co-association became the default on 2026-11-08;
+enrichment remains the STRING-only alternative and the fallback when a
+checkpoint cannot score the network. Trait co-association shows the traits behind each candidate
+(*Supporting traits*) and lists the disease's up to 20 most similar traits; the
+strict variant excludes traits that share a word with the disease name. The
+blend is the benchmark's `hetero+enrichment-z` (the sum of
+the per-disease z-scores of enrichment and the model's logit, each over all
+nodes of the network); across the checkpoints tried it recovered about as many
+hidden disease genes in the top 50 as enrichment alone or somewhat more (−2 % to
++16 %), with mixed recall@200. The model alone is labelled
+*experimental, below enrichment on the benchmark*: it recovers far fewer hidden
+genes and a few genes dominate its top ranks. The export's `manifest.json`
+names the scorer that produced the bundle (`enrichment`, `trait-coassociation`,
+`trait-coassociation-strict`, `hetero-gnn+enrichment-z` or `hetero-gnn`) and,
+for the co-association scorers, its parameters; the predicted links gain
+trailing `model_score` and `supporting_traits` columns (empty when enrichment
+ranked), a co-association bundle adds `similar_traits.csv` (each disease's 20
+most similar traits with their similarity), and the existing columns are
+unchanged.
+
+The Predictions page no longer needs a protein–protein model: **Predict without
+a protein model** (offered next to *Load Model*) ranks disease genes by network
+enrichment or a gene–disease model and exports them with only the network
+loaded. Without a protein model there is no similarity tie-break (the export's
+`similarity` column is empty and the manifest records `model.type = "none"`),
+and the Find Similar Genes and Check Gene Pair tabs, which compare learned
+protein profiles, say so instead of running.
+
 ## 🛠️ Development
 
 ```bash
-pytest                      # 93 tests, CPU only, about 15 s
+pytest                      # 196 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 
@@ -152,8 +307,10 @@ and matches the full-batch gradient, and the RWSE cache is deterministic.
 app.py                     Streamlit entry point and navigation
 pages/                     One file per page (download, search, explorer, training, predictions, data browsers)
 src/data/                  Bulk downloaders, SQLite manager, live API clients (GWAS, GTEx, HPA, STRING, AlphaFold, mygene)
-src/models/                GNN, Graph Transformer, Graph VAE, Trainer, Modal app
-src/utils/                 NetworkX -> PyG conversion, graph builder, session helpers, text explainer
+src/models/                GNN, Graph Transformer, Graph VAE, Trainer, Modal app; hetero gene–disease model and trainer
+src/utils/                 NetworkX -> PyG conversion (homogeneous and heterogeneous), graph builder, discovery scoring,
+                           benchmark, hetero checkpoint scorer, session helpers, text explainer
+scripts/                   Command-line tools: held-out disease-gene benchmark, hetero gene–disease model training
 tests/                     pytest suite
 docs/                      Graph Transformer tutorial, design specs, write-ups
 lib/                       Vendored JS assets for the network visualisation

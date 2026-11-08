@@ -8,6 +8,19 @@ from src.models.gnn import GNNLinkPredictor
 from src.models.graph_transformer import GraphTransformerLinkPredictor
 from src.models.vae import GraphVAE
 from src.models.trainer import Trainer, TrainConfig
+from src.models.hetero_gnn import DECODERS, HeteroGNNLinkPredictor
+from src.models.hetero_pipeline import (
+    benchmark_hetero,
+    check_validation_split,
+    describe_hetero_params,
+    hetero_model_kwargs,
+    hetero_training_payload,
+    prepare_hetero_training,
+    save_hetero_run,
+    train_hetero,
+)
+from src.models.hetero_trainer import NEG_SAMPLING, HeteroTrainConfig
+from src.utils.hetero_scorer import HETERO_MODEL_TYPE
 from src.data.bulk_datasets import BulkDatasetManager
 from src.utils import session
 
@@ -177,6 +190,118 @@ edge_attr = getattr(pyg_data, "edge_attr", None)
 edge_dim = edge_attr.size(1) if edge_attr is not None else 0
 
 # ---------------------------------------------------------------------------
+# Hetero GNN (gene–disease) training flow — the CLI's pipeline, driven from the page
+# ---------------------------------------------------------------------------
+def run_hetero_training(graph, graph_name, manager, *, model_options, min_trait_genes, holdout, config_kwargs,
+                        compute_mode, gpu_type):
+    """Prepare, train (here or on a Modal GPU), benchmark against enrichment, save the checkpoint and
+    record the run. Nothing is stored in ``training_results``: the Predictions page would treat the
+    model as a protein–protein model; the checkpoint appears there under *Ranking score* instead."""
+    import pickle
+    import pandas as pd
+
+    try:
+        with st.spinner("Building the gene–trait graph..."):
+            prepared = prepare_hetero_training(graph, holdout=holdout, min_trait_genes=min_trait_genes)
+    except ValueError as e:
+        st.error(f"Cannot train on this network: {e}")
+        return
+    summary = (f"**{len(prepared.bundle.node_list):,} genes · {len(prepared.bundle.trait_list):,} traits · "
+               f"{prepared.n_assoc:,} gene–trait associations**")
+    if prepared.split is not None:
+        summary += (f" ({prepared.n_hidden:,} hidden pairs of {len(prepared.split.diseases)} benchmark "
+                    f"diseases removed before training)")
+    st.markdown(summary)
+
+    model_kwargs = hetero_model_kwargs(prepared.bundle, **model_options)
+    device = "mps" if compute_mode == "This Mac's GPU" else "cpu"
+    try:
+        config = HeteroTrainConfig(**config_kwargs, device=device)
+        check_validation_split(prepared.index, prepared.split, config)
+    except ValueError as e:
+        st.error(f"Cannot train with these settings: {e}")
+        return
+    remote = compute_mode == "Cloud GPU (Modal)"
+    st.markdown(f"**Training on:** {f'Cloud GPU ({gpu_type})' if remote else compute_mode}")
+
+    if remote:
+        st.info(f"Submitting to cloud ({gpu_type})... First run may take ~60s to start.")
+        try:
+            from src.models.modal_app import HETERO_TRAIN_FUNCTIONS, app as modal_app, collect_source_code
+            payload_bytes = pickle.dumps(hetero_training_payload(prepared, model_kwargs, config))
+            with st.spinner(f"Training on {gpu_type} GPU..."):
+                with modal_app.run():
+                    result = HETERO_TRAIN_FUNCTIONS[gpu_type].remote(payload_bytes, collect_source_code())
+        except Exception as e:
+            st.error(f"Cloud training failed: {e}")
+            return
+        model = HeteroGNNLinkPredictor(**model_kwargs)
+        model.load_state_dict(pickle.loads(result["model_state_dict"]))
+        history, metrics = result["history"], result["metrics"]
+        st.success(f"Training complete on {result['device_used']}!")
+    else:
+        progress_bar = st.progress(0)
+        chart = st.empty()
+        status = st.empty()
+        losses, mrrs = [], []
+        redraw_every = max(1, config.epochs // 100)
+
+        def on_epoch(epoch, loss, val_mrr):
+            losses.append(loss)
+            mrrs.append(val_mrr)
+            progress_bar.progress((epoch + 1) / config.epochs)
+            status.text(f"Round {epoch + 1}/{config.epochs} — Loss: {loss:.4f}, Validation MRR: {val_mrr:.4f}")
+            if (epoch + 1) % redraw_every == 0:
+                chart.line_chart(pd.DataFrame({"Loss (lower=better)": losses, "Validation MRR": mrrs}))
+
+        try:
+            with st.spinner(f"Training on {'Mac GPU' if device == 'mps' else 'CPU'}..."):
+                trained = train_hetero(prepared.bundle, prepared.index, prepared.split, model_kwargs, config,
+                                       on_epoch=on_epoch)
+        except ValueError as e:
+            st.error(f"Training could not start: {e}")
+            return
+        progress_bar.progress(1.0)
+        model, history, metrics = trained.model, trained.history, trained.metrics
+        st.success("Training complete!")
+
+    with st.spinner("Benchmarking against network enrichment..." if holdout else "Saving the model..."):
+        benchmark = benchmark_hetero(model, prepared, graph)
+        params = describe_hetero_params(model_kwargs, config, holdout=holdout, gpu=gpu_type if remote else None)
+        saved = save_hetero_run(manager, model=model, model_kwargs=model_kwargs, prepared=prepared, config=config,
+                                metrics=metrics, benchmark=benchmark, graph_name=graph_name,
+                                min_trait_genes=min_trait_genes, params=params)
+
+    st.divider()
+    st.markdown("**Results**")
+    result_cols = st.columns(3)
+    result_cols[0].metric("Validation MRR", f"{metrics['val_mrr']:.4f}",
+                          help="Reciprocal rank of the best hidden validation gene, averaged over diseases. "
+                               "1.0 = a hidden gene ranked first for every disease.")
+    result_cols[1].metric("Validation recall@50", f"{metrics['val_recall50']:.4f}",
+                          help="Share of hidden validation genes ranked in the top 50.")
+    result_cols[2].metric("Validation AUC", f"{metrics['val_auc']:.4f}")
+    st.caption(f"{metrics['epochs_run']} rounds run; best weights from round {metrics['best_epoch'] + 1}.")
+    st.line_chart(pd.DataFrame({"Loss": history["train_loss"], "Validation MRR": history["val_mrr"]}))
+
+    if benchmark:
+        model_result, enrichment_result = benchmark["hetero"], benchmark["enrichment"]
+        st.markdown(f"**Benchmark on the hidden pairs** ({model_result.n_hidden:,} hidden genes, "
+                    f"{model_result.n_diseases} diseases)")
+        rows = [{"Scorer": name, "recall@50": f"{r.recall[50]:.4f}", "recall@200": f"{r.recall[200]:.4f}",
+                 "Median rank": f"{r.median_rank:.0f}", "MRR": f"{r.mrr:.4f}"} for name, r in benchmark.items()]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        if model_result.recall[50] > enrichment_result.recall[50] and model_result.mrr > enrichment_result.mrr:
+            st.caption("The model beats network enrichment on recall@50 and MRR.")
+        else:
+            st.caption("The model does not beat network enrichment on recall@50 and MRR, so enrichment stays the "
+                       "default ranking; the Predictions page labels this model experimental.")
+
+    st.caption(f"Model saved (run #{saved.run_id}) — {saved.checkpoint_path}")
+    st.page_link("pages/4_Results.py", label="📊 Use it under Ranking score on the Predictions page")
+
+
+# ---------------------------------------------------------------------------
 # Three-column layout: Data | Model | Training
 # ---------------------------------------------------------------------------
 col_data, col_config, col_monitor = st.columns([1, 1, 1])
@@ -205,10 +330,12 @@ with col_config:
 
     model_type = st.radio(
         "Choose a model",
-        ["GNN (recommended)", "Graph Transformer", "VAE"],
+        ["GNN (recommended)", "Graph Transformer", "VAE", "Hetero GNN (gene–disease)"],
         help="**GNN** — Fast, works well for most cases. Good default.\n\n"
              "**Graph Transformer** — More powerful for large networks, uses attention to weigh connections.\n\n"
-             "**VAE** — Finds genes in similar 'latent space'. Good for discovering unexpected similarities.",
+             "**VAE** — Finds genes in similar 'latent space'. Good for discovering unexpected similarities.\n\n"
+             "**Hetero GNN** — Learns gene–disease links directly: genes and GWAS traits are nodes of one "
+             "graph. Its scores appear on the Predictions page under *Ranking score*.",
     )
     # Clean model type for internal use
     model_type_clean = model_type.split(" (")[0]  # Remove "(recommended)"
@@ -230,6 +357,21 @@ with col_config:
             transformer_dropout = st.slider("Dropout", 0.0, 0.5, 0.1, 0.05)
             transformer_ff_mult = st.select_slider("FFN expansion", [1, 2, 4], value=2)
         st.caption("Transformer uses attention to weigh which gene connections matter most.")
+    elif model_type_clean == HETERO_MODEL_TYPE:
+        with st.expander("Model settings", expanded=False):
+            hidden_dim = st.select_slider("Hidden dimension", [32, 64, 128, 256], value=128)
+            num_layers = st.slider("Layers", 1, 3, 2)
+            hetero_decoder = st.selectbox("Decoder", list(DECODERS),
+                                          help="How a gene embedding and a trait embedding become a score.")
+            hetero_dropout = st.slider("Dropout", 0.0, 0.5, 0.2, 0.05)
+            min_trait_genes = st.slider("Ignore traits with fewer known genes", 1, 10, 1,
+                                        help="Traits with fewer genes than this get no node in the graph.")
+            neg_gene = st.slider("Gene-corrupted negatives per known pair", 1, 8, 4)
+            neg_trait = st.slider("Trait-corrupted negatives per known pair", 0, 4, 1)
+            neg_sampling = st.selectbox("Negative sampling", list(NEG_SAMPLING),
+                                        help="degree: draw negative genes in proportion to how many traits they have.")
+        st.caption("Learns gene–disease links directly: genes and GWAS traits are nodes of one graph. "
+                   "Benchmarked against network enrichment when the hold-out is on.")
     else:  # VAE
         with st.expander("Model settings", expanded=False):
             hidden_dim = st.select_slider("Hidden dimension", [16, 32, 64, 128, 256, 512], value=64)
@@ -238,8 +380,10 @@ with col_config:
             beta = st.slider("Regularization strength", 0.1, 10.0, 1.0, 0.1)
         st.caption("VAE compresses gene profiles — genes close in compressed space may share hidden connections.")
 
+    is_hetero = model_type_clean == HETERO_MODEL_TYPE
     with st.expander("Training settings", expanded=False):
-        epochs = st.slider("Training rounds (epochs)", 10, 500, 100,
+        max_epochs, default_epochs = (2000, 300) if is_hetero else (500, 100)
+        epochs = st.slider("Training rounds (epochs)", 10, max_epochs, default_epochs,
                            help="More epochs = longer training but potentially better results. "
                                 "Early stopping will halt if the model stops improving.")
         default_lr = 0.0005 if model_type_clean == "Graph Transformer" else 0.001
@@ -249,17 +393,32 @@ with col_config:
         seed = int(st.number_input("Random seed", min_value=0, max_value=2**31 - 1, value=42, step=1,
                                    help="Same seed = same data split, negatives and initialization, "
                                         "so different models can be compared on equal footing."))
+        holdout = True
+        val_fraction, eval_every, patience = 0.1, 1, 20
+        if is_hetero:
+            holdout = st.checkbox("Hold out benchmark pairs and benchmark against enrichment", value=True,
+                                  help="Removes 20 % of each disease's known genes (seeded) before training and "
+                                       "scores the model on them next to network enrichment. Untick for a "
+                                       "production model once the honest one has been validated.")
+            val_fraction = st.slider("Validation share of each disease's genes", 0.05, 0.30, 0.10, 0.05,
+                                     help="A second seeded hold-out that drives early stopping.")
+            eval_every = st.slider("Validate every N rounds", 1, 20, 1)
+            patience = st.slider("Patience (validations without improvement)", 5, 50, 20)
+            st.caption("The edge split under Network Summary applies to protein–protein models; "
+                       "this model holds out disease genes instead.")
         weight_decay = 0.0
         warmup_epochs = 0
         if model_type_clean == "Graph Transformer":
             weight_decay = st.select_slider("Weight decay", [0.0, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3], value=1e-4)
             warmup_epochs = st.slider("Warmup epochs", 0, min(20, epochs // 2), min(5, epochs // 2))
-        mini_batch = st.checkbox(
-            "Use mini-batches (for large networks)",
-            value=False,
-            help="Processes the network in chunks instead of all at once. "
-                 "Reduces memory usage for networks with >10K genes.",
-        )
+        mini_batch = False
+        if not is_hetero:
+            mini_batch = st.checkbox(
+                "Use mini-batches (for large networks)",
+                value=False,
+                help="Processes the network in chunks instead of all at once. "
+                     "Reduces memory usage for networks with >10K genes.",
+            )
         batch_size = 512
         edge_dropout = 0.0
         if mini_batch:
@@ -285,7 +444,10 @@ with col_config:
         except ImportError:
             st.error("Modal not installed. Run: `pip install modal && modal setup`")
     elif compute_mode == "This Mac's GPU":
-        st.caption("Apple Silicon GPU detected — training will be faster")
+        if is_hetero:
+            st.caption("Apple Silicon GPU detected. For this model the CPU was faster than the Mac GPU in our runs.")
+        else:
+            st.caption("Apple Silicon GPU detected — training will be faster")
 
 # ---------------------------------------------------------------------------
 # Training monitor
@@ -293,7 +455,18 @@ with col_config:
 with col_monitor:
     st.subheader("Training")
 
-    if st.button("🚀 Start Training", type="primary", use_container_width=True):
+    start_training = st.button("🚀 Start Training", type="primary", use_container_width=True)
+    if start_training and is_hetero:
+        run_hetero_training(
+            graph, _saved_graph_name, manager,
+            model_options=dict(hidden=hidden_dim, layers=num_layers, dropout=hetero_dropout, decoder=hetero_decoder),
+            min_trait_genes=min_trait_genes, holdout=holdout,
+            config_kwargs=dict(epochs=epochs, lr=lr, neg_gene=neg_gene, neg_trait=neg_trait,
+                               neg_sampling=neg_sampling, val_fraction=val_fraction, early_stopping=early_stop,
+                               patience=patience, eval_every=eval_every, seed=seed),
+            compute_mode=compute_mode, gpu_type=gpu_type,
+        )
+    if start_training and not is_hetero:
         # GWAS token params for models
         gwas_params = dict(
             gwas_vocab_size=getattr(pyg_data, "gwas_vocab_size", 0),

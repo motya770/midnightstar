@@ -56,3 +56,13 @@ def get_model_predictions() -> list[dict] | None:
 
 def set_model_predictions(predictions: list[dict]):
     st.session_state["model_predictions"] = predictions
+
+
+def get_no_protein_model() -> bool:
+    """True when the user chose to use the Predictions page without a protein–protein model
+    (ranking by network enrichment or a gene–disease model, which need only the network)."""
+    return bool(st.session_state.get("no_protein_model", False))
+
+
+def set_no_protein_model(flag: bool):
+    st.session_state["no_protein_model"] = bool(flag)

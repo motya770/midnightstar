@@ -11,6 +11,7 @@ import os
 import datetime
 import glob as glob_mod
 from src.utils import session
+from src.utils.coassociation import annotate_supporting_traits, coassociation_scores
 from src.utils.discovery import (
     index_disease_genes,
     known_links_rows,
@@ -18,10 +19,25 @@ from src.utils.discovery import (
     select_diseases,
 )
 from src.utils.discovery_export import (
+    BLEND_SCORER,
+    COASSOCIATION_SCORER,
+    COASSOCIATION_STRICT_SCORER,
+    ENRICHMENT_SCORER,
+    HETERO_SCORER,
     PREDICTED_FILE,
     build_manifest,
     write_discovery_bundle,
     zip_bundle,
+)
+from src.utils.hetero_scorer import (
+    HETERO_MODEL_CLASS,
+    HETERO_MODEL_TYPE,
+    blend_with_enrichment,
+    find_hetero_checkpoints,
+    hetero_encode,
+    is_hetero_checkpoint_path,
+    load_hetero_checkpoint,
+    score_from_encoding,
 )
 from src.models.gnn import GNNLinkPredictor
 from src.models.graph_transformer import GraphTransformerLinkPredictor
@@ -29,7 +45,7 @@ from src.models.vae import GraphVAE
 
 st.title("📊 Predictions & Discovery")
 st.markdown(
-    "Use your trained model to predict **new gene-disease connections**, "
+    "Predict **new gene-disease connections** from the network alone or with a trained model, "
     "find genes with similar profiles, or check if two genes are likely to interact."
 )
 
@@ -50,25 +66,15 @@ if graph is None:
 # ---------------------------------------------------------------------------
 # No model loaded — let user pick one
 # ---------------------------------------------------------------------------
-if results is None:
+if results is None and not session.get_no_protein_model():
     from src.utils.graph_features import nx_to_pyg_data
 
     checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".datasets", "trained_models")
-    checkpoints = sorted(glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt")))
-    training_runs = _mgr.list_training_runs()
-
-    if not checkpoints and not training_runs:
-        st.info(
-            "No trained models found yet. You need to train a model first before you can see predictions."
-        )
-        st.markdown(
-            "Go to **Train Model** to build a network and train an AI model on it. "
-            "This typically takes a few minutes."
-        )
-        st.stop()
-
-    st.subheader("Select a trained model")
-    st.markdown("Choose which model to use for predictions.")
+    # Gene–disease (hetero) checkpoints rank diseases under "Ranking score" below; they are not
+    # protein–protein models and cannot be loaded here.
+    checkpoints = sorted(p for p in glob_mod.glob(os.path.join(checkpoint_dir, "*_checkpoint.pt"))
+                         if not is_hetero_checkpoint_path(p))
+    training_runs = [r for r in _mgr.list_training_runs() if r.get("model_type") != HETERO_MODEL_TYPE]
 
     # Build options list
     options = []
@@ -86,19 +92,27 @@ if results is None:
             option_meta.append(("run", run))
 
     if not options:
-        st.warning("No loadable models found. Please retrain a model.")
-        st.stop()
+        st.info("No loadable protein–protein model found yet. Go to **Train Model** to build a network and train "
+                "one (this typically takes a few minutes), or predict without one below.")
+    else:
+        st.subheader("Select a trained model")
+        st.markdown("Choose which protein–protein model to use for predictions.")
+        selected_idx = st.selectbox("Model", range(len(options)),
+                                    format_func=lambda i: options[i])
 
-    selected_idx = st.selectbox("Model", range(len(options)),
-                                format_func=lambda i: options[i])
-
-    if st.button("Load Model", type="primary"):
+    if options and st.button("Load Model", type="primary"):
         kind, meta = option_meta[selected_idx]
 
         if kind == "checkpoint":
             checkpoint = torch.load(meta, map_location="cpu", weights_only=False)
             model_class = checkpoint["model_class"]
             model_kwargs = checkpoint["model_kwargs"]
+            if model_class == HETERO_MODEL_CLASS:
+                st.error("This is a gene–disease model checkpoint, not a protein–protein model. Load a "
+                         "protein–protein model here and choose the gene–disease model under **Ranking score** "
+                         "in the Predict Disease Genes tab (it is listed there when the file is named "
+                         "`hetero_gnn_<stamp>_checkpoint.pt`).")
+                st.stop()
 
             # Load graph for this checkpoint
             graph_name = checkpoint.get("graph_name", "")
@@ -144,35 +158,165 @@ if results is None:
         session.set_training_results(results)
         st.rerun()
 
+    # Without a protein–protein model: enrichment and the gene–disease model need only the network.
+    st.markdown("**Or predict without a protein–protein model**")
+    hetero_count = len(find_hetero_checkpoints(checkpoint_dir))
+    hetero_note = ("" if not hetero_count
+                   else ", or by the gene–disease model checkpoint found," if hetero_count == 1
+                   else f", or by one of the {hetero_count} gene–disease model checkpoints found,")
+    st.caption(
+        "The Predict Disease Genes tab and the export rank candidates by trait co-association or network "
+        "enrichment" + hetero_note
+        + " using only the network. Find Similar Genes and Check Gene Pair need a protein–protein model."
+    )
+    if graph is None:
+        st.caption("No saved network found. Go to **Train Model** to build or load one first.")
+    elif st.button("🧬 Predict without a protein model"):
+        session.set_no_protein_model(True)
+        st.rerun()
+
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Model is loaded — compute embeddings
+# Protein model loaded — compute embeddings; or no protein model — the network alone
+# (enrichment and the gene–disease model need no embeddings; z and z_norm stay None)
 # ---------------------------------------------------------------------------
-model = results["model"].cpu()  # training may have left it on MPS/CUDA; features live on CPU
-pyg_data = results["pyg_data"].cpu()
-node_list = results["node_list"]
-node_to_idx = results["node_to_idx"]
-metrics = results["metrics"]
-model_type = results["model_type"]
+if results is not None:
+    model = results["model"].cpu()  # training may have left it on MPS/CUDA; features live on CPU
+    pyg_data = results["pyg_data"].cpu()
+    node_list = results["node_list"]
+    node_to_idx = results["node_to_idx"]
+    metrics = results["metrics"]
+    model_type = results["model_type"]
 
-model.eval()
-with torch.no_grad():
-    z = model.encode(pyg_data)
-    z_norm = F.normalize(z, dim=-1)
+    model.eval()
+    with torch.no_grad():
+        z = model.encode(pyg_data)
+        z_norm = F.normalize(z, dim=-1)
 
-# Model info bar
-st.markdown(
-    f"**Active model:** {model_type} · "
-    f"**Accuracy (AUC):** {metrics['auc_roc']:.4f} · "
-    f"**Genes loaded:** {z.size(0):,}"
-)
+    # Model info bar
+    st.markdown(
+        f"**Active model:** {model_type} · "
+        f"**Accuracy (AUC):** {metrics['auc_roc']:.4f} · "
+        f"**Genes loaded:** {z.size(0):,}"
+    )
+else:
+    if graph is None:
+        st.error("No network data available. Go to **Train Model** to build or load a network first.")
+        st.stop()
+    model = pyg_data = z = z_norm = None
+    node_list = sorted(graph.nodes())
+    node_to_idx = {n: i for i, n in enumerate(node_list)}
+    metrics = {}
+    model_type = None
+    col_bar, col_switch = st.columns([3, 1])
+    col_bar.markdown(
+        "**Active model:** none — ranking by trait co-association, network enrichment or a gene–disease model · "
+        f"**Genes loaded:** {len(node_list):,}"
+    )
+    if col_switch.button("Load a protein–protein model instead"):
+        session.set_no_protein_model(False)
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Helper data
 # ---------------------------------------------------------------------------
 # Known GWAS associations per trait (exact trait names), shared by the disease tab and the export.
 disease_index = index_disease_genes(graph, node_list) if graph else {}
+
+# ---------------------------------------------------------------------------
+# Ranking scorer: trait co-association by default (the gene's GWAS associations with the traits most
+# similar to the disease, no model needed); network enrichment (STRING guilt-by-association, the default
+# until 2026-11-08 and the fallback when a checkpoint cannot score the network); or a trained
+# heterogeneous gene–disease model when a checkpoint from scripts/train_hetero_disease_model.py exists.
+# ---------------------------------------------------------------------------
+_CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".datasets", "trained_models")
+# Benchmark (README, "Held-out disease-gene benchmark"): recall@50 co-association 0.260, strict 0.193,
+# enrichment 0.042; part of the co-association gain comes from GWAS Catalog alias traits.
+SCORER_COASSOCIATION_LABEL = ("Trait co-association (default; genes of the GWAS traits most similar to the "
+                              "disease; recall@50 0.26 on the benchmark)")
+SCORER_COASSOCIATION_STRICT_LABEL = ("Trait co-association, strict (traits sharing a word with the disease name "
+                                     "excluded; recall@50 0.19)")
+SCORER_ENRICHMENT_LABEL = "Network enrichment (STRING partners of the known genes; recall@50 0.04)"
+# The hetero model alone is far below enrichment and its z-score blend with enrichment at or slightly
+# above it: the blend comes after enrichment, the model alone is experimental.
+SCORER_BLEND_NOTE = "(z-score blend, at or slightly above enrichment on the benchmark)"
+SCORER_HETERO_NOTE = "(experimental, below enrichment on the benchmark)"
+_hetero_paths = list(reversed(find_hetero_checkpoints(_CHECKPOINT_DIR)))
+
+
+def _checkpoint_name(path):
+    return os.path.basename(path).replace("_checkpoint.pt", "")
+
+
+_scorer_kinds = {   # label -> (scorer name for the manifest, checkpoint path or None)
+    SCORER_COASSOCIATION_LABEL: (COASSOCIATION_SCORER, None),
+    SCORER_COASSOCIATION_STRICT_LABEL: (COASSOCIATION_STRICT_SCORER, None),
+}
+scorer_options = list(_scorer_kinds) + [SCORER_ENRICHMENT_LABEL]   # the first option is the default
+for _p in _hetero_paths:
+    _label = f"Enrichment + gene–disease model: {_checkpoint_name(_p)} {SCORER_BLEND_NOTE}"
+    _scorer_kinds[_label] = (BLEND_SCORER, _p)
+    scorer_options.append(_label)
+for _p in _hetero_paths:
+    _label = f"Gene–disease model: {_checkpoint_name(_p)} {SCORER_HETERO_NOTE}"
+    _scorer_kinds[_label] = (HETERO_SCORER, _p)
+    scorer_options.append(_label)
+SCORER_HELP = (
+    "**Trait co-association** (the default) ranks by the gene's GWAS associations with the up to 20 traits most "
+    "similar to the disease (cosine similarity of their gene sets), weighted by similarity and association "
+    "strength: on the held-out benchmark it recovered 26 % of hidden disease genes in the top 50, with no hub "
+    "genes. Part of that gain comes from GWAS Catalog alias traits ('diabetes mellitus' for type 2 diabetes); "
+    "the **strict** variant drops traits that share a word with the disease name (19 % on the benchmark). "
+    "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the disease's "
+    "known genes (4 % on the benchmark; the default until trait co-association, and the fallback when a "
+    "checkpoint cannot score the network); it also breaks ties for the co-association rankings. "
+    "**Enrichment + gene–disease model** adds, per disease, "
+    "the z-score of a heterogeneous graph neural network's score to the z-score of enrichment: on the "
+    "held-out benchmark this blend recovered about as many hidden disease genes in the top 50 as enrichment "
+    "alone or somewhat more (−2 % to +16 % across the checkpoints tried; recall@200 was mixed). "
+    "**Gene–disease model** ranks by that network "
+    "alone; it recovers far fewer hidden genes than enrichment and a few genes dominate its top ranks, so "
+    "treat it as experimental. Compare checkpoints with scripts/benchmark_disease_genes.py before trusting one."
+)
+
+
+@st.cache_resource(show_spinner="Encoding the network with the gene–disease model...")
+def _hetero_encoding(checkpoint_path, graph_token, _graph):
+    """One graph conversion and forward pass per (checkpoint, network); every disease list is scored from it."""
+    return hetero_encode(load_hetero_checkpoint(checkpoint_path), _graph)
+
+
+def scorer_for(label, diseases):
+    """(score matrix or None, scorer name for the manifest, checkpoint path or None,
+    CoassociationScores or None).
+
+    The co-association result carries the similar traits per disease, for the supporting-traits
+    column and the export's similar_traits.csv. When a checkpoint cannot score this network
+    (different traits or gene features, unreadable file), the ranking falls back to network
+    enrichment with a visible warning, and the manifest records enrichment."""
+    if label == SCORER_ENRICHMENT_LABEL or label not in _scorer_kinds:
+        return None, ENRICHMENT_SCORER, None, None
+    scorer_name, path = _scorer_kinds[label]
+    diseases = list(diseases)
+    if scorer_name in (COASSOCIATION_SCORER, COASSOCIATION_STRICT_SCORER):
+        coassociation = coassociation_scores(disease_index, node_list, node_to_idx, diseases,
+                                             exclude_name_sharing=(scorer_name == COASSOCIATION_STRICT_SCORER))
+        return coassociation.matrix, scorer_name, None, coassociation
+    try:
+        encoding = _hetero_encoding(path, session.get_graph_token(), graph)
+        matrix = score_from_encoding(encoding, diseases)
+    except (ValueError, RuntimeError, KeyError) as e:
+        st.warning("The gene–disease checkpoint cannot score this network, so this ranking uses network "
+                   f"enrichment instead. {str(e)[:300]}")
+        return None, ENRICHMENT_SCORER, None, None
+    if scorer_name == BLEND_SCORER:
+        matrix = blend_with_enrichment(matrix, graph, node_list, node_to_idx, disease_index, diseases)
+    return matrix, scorer_name, path, None
+
+
+def pick_scorer(key):
+    return st.selectbox("Ranking score", scorer_options, key=key, help=SCORER_HELP)
 
 
 def find_similar_genes(gene_name, top_k=20):
@@ -201,6 +345,11 @@ def find_similar_genes(gene_name, top_k=20):
 # ---------------------------------------------------------------------------
 # Three discovery tabs
 # ---------------------------------------------------------------------------
+NEEDS_PROTEIN_MODEL = (
+    "**{tab}** compares the learned profiles of a protein–protein model, and none is loaded. "
+    "Use **Load a protein–protein model instead** above."
+)
+
 tab_disease, tab_gene, tab_link = st.tabs([
     "🧬 Predict Disease Genes",
     "🔎 Find Similar Genes",
@@ -210,10 +359,14 @@ tab_disease, tab_gene, tab_link = st.tabs([
 # === Tab 1: Disease Gene Discovery ===
 with tab_disease:
     st.markdown(
-        "**Pick a disease** to rank candidate genes by how strongly their STRING interaction "
-        "partners are enriched for the disease's known genes (guilt-by-association). Ties, "
-        "mostly genes with no known partner, are broken by similarity of the model's learned "
-        "profiles. Candidates are hypotheses for follow-up, not a diagnosis."
+        "**Pick a disease** to rank candidate genes by trait co-association: the gene's GWAS associations "
+        "with the traits most similar to the disease, weighted by how similar they are (the default; the "
+        "traits behind each candidate are shown). **Network enrichment** ranks instead by how strongly the "
+        "gene's STRING partners are enriched for the disease's known genes"
+        + (", with ties, mostly genes with no known partner, broken by similarity of the model's learned "
+           "profiles" if z_norm is not None else "")
+        + ", and a trained gene–disease model, when available, by its score. "
+        "Candidates are hypotheses for follow-up, not a diagnosis."
     )
 
     if disease_index:
@@ -244,12 +397,17 @@ with tab_disease:
                 format_func=lambda x: f"{x} ({len(filtered[x]['genes'])} known genes)",
             )
             top_k = st.slider("How many predictions?", 10, 200, 50)
+            disease_scorer = pick_scorer("disease_scorer")
 
             if st.button("🔮 Predict New Genes", type="primary"):
                 known_genes = sorted(disease_index[selected_disease]["genes"])
+                scores, scorer_name, _, coassociation = scorer_for(disease_scorer, [selected_disease])
                 candidates = predict_gene_disease_links(
                     z_norm, node_list, node_to_idx, graph, disease_index, [selected_disease], top_k,
+                    scores=scores,
                 )
+                if coassociation is not None:
+                    annotate_supporting_traits(candidates, coassociation)
 
                 if candidates:
                     col_known, col_pred = st.columns(2)
@@ -264,15 +422,34 @@ with tab_disease:
 
                     with col_pred:
                         st.markdown(f"**Candidates ({len(candidates)} genes):**")
-                        st.caption("Enrichment = -log10 p that this many of the gene's partners are known disease genes")
+                        score_column = {HETERO_SCORER: "Model score", BLEND_SCORER: "Blend score",
+                                        COASSOCIATION_SCORER: "Co-association score",
+                                        COASSOCIATION_STRICT_SCORER: "Co-association score"}.get(scorer_name)
+                        if coassociation is not None:
+                            st.caption(f"Ranked by the gene's GWAS associations with the "
+                                       f"{len(coassociation.similar_traits[0])} traits most similar to this disease, "
+                                       "weighted by similarity and association strength; enrichment breaks ties")
+                        elif scorer_name == BLEND_SCORER:
+                            st.caption("Ranked by the sum of the per-disease z-scores of enrichment and the "
+                                       "gene–disease model's score")
+                        elif scorer_name == HETERO_SCORER:
+                            st.caption("Ranked by the gene–disease model's score; enrichment shown for reference")
+                        else:
+                            st.caption("Enrichment = -log10 p that this many of the gene's partners are known disease genes")
                         pred_df = pd.DataFrame([{
                             "Gene": c["gene"],
+                            **({score_column: c["model_score"]} if score_column else {}),
+                            **({"Supporting traits": c["supporting_traits"]} if coassociation is not None else {}),
                             "Enrichment": c["enrichment_score"],
                             "Known interactors": c["known_interactors"],
-                            "Similarity": c["similarity"],
+                            **({"Similarity": c["similarity"]} if z_norm is not None else {}),
                             "Description": c["gene_description"],
                         } for c in candidates])
                         st.dataframe(pred_df, height=300)
+                        if coassociation is not None:
+                            with st.expander(f"Traits most similar to {selected_disease}"):
+                                st.dataframe(pd.DataFrame(coassociation.similar_traits[0],
+                                                          columns=["Trait", "Similarity"]), height=300)
 
                     # Visualization: known genes that touch the shown candidates first
                     st.subheader("Discovery network")
@@ -324,13 +501,16 @@ with tab_disease:
 
 # === Tab 2: Gene Similarity ===
 with tab_gene:
-    st.markdown(
-        "Enter a gene to find others with the most **similar AI-learned profiles**. "
-        "These genes share expression patterns, network neighborhoods, and disease associations — "
-        "they may be involved in the same biological pathways."
-    )
-
-    gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, APOE", key="sim_gene").strip().upper()
+    gene_input = ""
+    if z_norm is None:
+        st.info(NEEDS_PROTEIN_MODEL.format(tab="Find Similar Genes"))
+    else:
+        st.markdown(
+            "Enter a gene to find others with the most **similar AI-learned profiles**. "
+            "These genes share expression patterns, network neighborhoods, and disease associations — "
+            "they may be involved in the same biological pathways."
+        )
+        gene_input = st.text_input("Gene symbol", placeholder="e.g., TP53, BRCA1, APOE", key="sim_gene").strip().upper()
 
     if gene_input:
         if gene_input in node_to_idx:
@@ -380,16 +560,19 @@ with tab_gene:
 
 # === Tab 3: Link Prediction ===
 with tab_link:
-    st.markdown(
-        "Check whether two specific genes are predicted to interact. "
-        "The model scores the likelihood based on their learned profiles."
-    )
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        gene_a = st.text_input("First gene", placeholder="e.g., TP53", key="link_a").strip().upper()
-    with col_b:
-        gene_b = st.text_input("Second gene", placeholder="e.g., BRCA1", key="link_b").strip().upper()
+    gene_a = gene_b = ""
+    if z_norm is None:
+        st.info(NEEDS_PROTEIN_MODEL.format(tab="Check Gene Pair"))
+    else:
+        st.markdown(
+            "Check whether two specific genes are predicted to interact. "
+            "The model scores the likelihood based on their learned profiles."
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            gene_a = st.text_input("First gene", placeholder="e.g., TP53", key="link_a").strip().upper()
+        with col_b:
+            gene_b = st.text_input("Second gene", placeholder="e.g., BRCA1", key="link_b").strip().upper()
 
     if gene_a and gene_b:
         if gene_a not in node_to_idx:
@@ -436,7 +619,7 @@ with tab_link:
 # Save / Export
 # ---------------------------------------------------------------------------
 st.divider()
-if st.button("💾 Save Model to Disk"):
+if model is not None and st.button("💾 Save Model to Disk"):
     save_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".models")
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, f"{model_type.lower().replace(' ', '_')}_model.pt")
@@ -451,6 +634,8 @@ st.markdown(
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Keys the export preview to the model, or, without one, to the network it was made from.
+_model_token = id(model) if model is not None else ("no-protein-model", session.get_graph_token())
 
 if not disease_index:
     st.info("No disease/GWAS data in the network, so there is nothing to export.")
@@ -471,6 +656,7 @@ else:
             )
         with col_k:
             exp_top_k = st.slider("Candidates per disease", 10, 200, 50)
+        exp_scorer = pick_scorer("export_scorer")
         exp_dir = st.text_input(
             "Export folder",
             value=os.path.join(_PROJECT_ROOT, ".datasets", "exports"),
@@ -485,33 +671,44 @@ else:
         else:
             try:
                 with st.spinner(f"Scoring candidates for {len(chosen)} diseases..."):
+                    exp_scores, exp_scorer_name, exp_scorer_path, exp_co = scorer_for(exp_scorer, chosen)
                     links = predict_gene_disease_links(
                         z_norm, node_list, node_to_idx, graph, disease_index, chosen, exp_top_k,
+                        scores=exp_scores,
                     )
+                    exp_similar = None
+                    if exp_co is not None:
+                        annotate_supporting_traits(links, exp_co)
+                        exp_similar = exp_co.similar_trait_rows()
                     known = known_links_rows(disease_index, chosen)
                     manifest = build_manifest(
                         model_type=model_type,
                         metrics=metrics,
-                        checkpoint_path=results.get("checkpoint_path"),
+                        checkpoint_path=results.get("checkpoint_path") if results else None,
                         graph_name=session.get_graph_name(),
-                        n_nodes=pyg_data.num_nodes,
-                        n_edges=pyg_data.edge_index.size(1) // 2,
-                        embedding_dim=z.size(1),
+                        n_nodes=pyg_data.num_nodes if pyg_data is not None else graph.number_of_nodes(),
+                        n_edges=pyg_data.edge_index.size(1) // 2 if pyg_data is not None else graph.number_of_edges(),
+                        embedding_dim=z.size(1) if z is not None else None,
                         categories=exp_categories,
                         min_known_genes=exp_min_genes,
                         top_k=exp_top_k,
                         links=links,
                         known=known,
+                        scorer=exp_scorer_name,
+                        scorer_checkpoint=exp_scorer_path,
+                        scorer_parameters=exp_co.parameters if exp_co is not None else None,
+                        similar_traits=exp_similar,
                     )
                     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     bundle = write_discovery_bundle(
                         os.path.join(exp_dir, f"discovery_{stamp}"), links, known, manifest,
+                        similar_traits=exp_similar,
                     )
             except OSError as e:
                 st.error(f"Could not write to `{exp_dir}`: {e}")
             else:
                 st.session_state["discovery_export"] = {
-                    "model_token": id(model),
+                    "model_token": _model_token,
                     "dir": str(bundle),
                     "zip": zip_bundle(bundle),
                     "links": links,
@@ -519,7 +716,7 @@ else:
                 }
 
     export = st.session_state.get("discovery_export")
-    if export and export["model_token"] == id(model):
+    if export and export["model_token"] == _model_token:
         counts = export["manifest"]["counts"]
         st.success(
             f"Exported {counts['predicted_links']:,} predicted connections for "
