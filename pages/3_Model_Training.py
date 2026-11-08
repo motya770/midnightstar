@@ -11,6 +11,7 @@ from src.models.trainer import Trainer, TrainConfig
 from src.models.hetero_gnn import DECODERS, HeteroGNNLinkPredictor
 from src.models.hetero_pipeline import (
     benchmark_hetero,
+    check_validation_split,
     describe_hetero_params,
     hetero_model_kwargs,
     hetero_training_payload,
@@ -216,8 +217,9 @@ def run_hetero_training(graph, graph_name, manager, *, model_options, min_trait_
     device = "mps" if compute_mode == "This Mac's GPU" else "cpu"
     try:
         config = HeteroTrainConfig(**config_kwargs, device=device)
+        check_validation_split(prepared.index, prepared.split, config)
     except ValueError as e:
-        st.error(f"Invalid training settings: {e}")
+        st.error(f"Cannot train with these settings: {e}")
         return
     remote = compute_mode == "Cloud GPU (Modal)"
     st.markdown(f"**Training on:** {f'Cloud GPU ({gpu_type})' if remote else compute_mode}")

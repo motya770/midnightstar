@@ -5,7 +5,7 @@ import os
 
 from src.data.bulk_datasets import BulkDatasetManager
 from src.utils.hetero_scorer import load_hetero_checkpoint
-from tests.utils.test_hetero_scorer import make_graph
+from tests.utils.test_hetero_scorer import GENES, make_graph
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -42,6 +42,15 @@ def test_cli_no_holdout_skips_the_benchmark_and_no_save_run_skips_the_record(tmp
     assert report["checkpoint"] == str(tmp_path / "prod.pt")
     assert load_hetero_checkpoint(tmp_path / "prod.pt")["split"] is None
     assert BulkDatasetManager(str(tmp_path)).list_training_runs() == []
+
+
+def test_cli_refuses_an_empty_validation_split(tmp_path, capsys):
+    G = make_graph()
+    for g in GENES[10:12]:          # Asthma keeps 10 genes: fine for the benchmark, nothing left to validate on
+        G.nodes[g].pop("gwas")
+    BulkDatasetManager(str(tmp_path)).save_graph(G, "tiny")
+    assert load_cli().main(["--data-dir", str(tmp_path), "--graph", "tiny", "--hidden", "8", "--epochs", "2"]) == 1
+    assert "early stopping" in capsys.readouterr().err
 
 
 def test_cli_reports_a_missing_graph(tmp_path, capsys):

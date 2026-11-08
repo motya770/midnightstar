@@ -8,6 +8,7 @@ import torch
 from src.data.bulk_datasets import BulkDatasetManager
 from src.models.hetero_pipeline import (
     benchmark_hetero,
+    check_validation_split,
     describe_hetero_params,
     hetero_model_kwargs,
     hetero_training_payload,
@@ -127,7 +128,25 @@ def test_payload_round_trip_reproduces_local_training():
     assert remote["history"]["train_loss"] == local.history["train_loss"]
 
 
+def test_validation_split_is_checked_before_training():
+    """A disease with exactly 10 known genes passes the benchmark hold-out (2 hidden, 8 visible) but leaves
+    nothing for the trainer's validation hold-out: refuse up front, with the fix, not inside the trainer."""
+    G = make_graph()
+    for g in GENES[10:12]:
+        G.nodes[g].pop("gwas")
+    prepared = prepare_hetero_training(G)
+    kwargs = hetero_model_kwargs(prepared.bundle, hidden=8)
+    with pytest.raises(ValueError, match="early stopping"):
+        check_validation_split(prepared.index, prepared.split, HeteroTrainConfig())
+    with pytest.raises(ValueError, match="early stopping"):
+        train_hetero(prepared.bundle, prepared.index, prepared.split, kwargs, HeteroTrainConfig(epochs=1))
+    assert check_validation_split(prepared.index, prepared.split, HeteroTrainConfig(early_stopping=False)).diseases == []
+    production = prepare_hetero_training(G, holdout=False)
+    assert check_validation_split(production.index, production.split, HeteroTrainConfig()).diseases == ["Asthma"]
+
+
 def test_modal_hetero_entrypoint_runs_the_payload_on_cpu():
+    pytest.importorskip("modal", reason="the Modal entry point needs the optional gpu extra")
     from src.models.modal_app import HETERO_TRAIN_FUNCTIONS, _do_train_hetero, collect_source_code
     assert set(HETERO_TRAIN_FUNCTIONS) == {"T4", "A10G", "A100"}
     prepared = prepare_hetero_training(make_graph())

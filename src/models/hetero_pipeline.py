@@ -21,7 +21,14 @@ import torch
 
 from src.models.hetero_gnn import HeteroGNNLinkPredictor
 from src.models.hetero_trainer import HeteroTrainConfig, HeteroTrainer
-from src.utils.benchmark import HETERO_SCORERS, BenchmarkResult, HoldoutSplit, make_holdout, reference_scorers
+from src.utils.benchmark import (
+    HETERO_SCORERS,
+    BenchmarkResult,
+    HoldoutSplit,
+    make_holdout,
+    mask_index,
+    reference_scorers,
+)
 from src.utils.discovery import index_disease_genes
 from src.utils.hetero_graph_features import GENE_GENE, GENE_TRAIT, TRAIT_CATEGORIES, HeteroBundle, nx_to_hetero_data
 from src.utils.hetero_scorer import (
@@ -79,6 +86,26 @@ def prepare_hetero_training(graph, *, holdout: bool = True, min_trait_genes: int
     return HeteroPrepared(bundle, index, split, node_list, node_to_idx, len(hidden))
 
 
+def check_validation_split(index: dict, split: HoldoutSplit | None, config: HeteroTrainConfig) -> HoldoutSplit:
+    """The validation hold-out the trainer will make (same protocol as ``HeteroTrainer._setup``), computed up
+    front so an empty one is refused before training starts, locally or on a cloud GPU, with the fix in the
+    message. A disease with 10 or 11 known genes passes the benchmark hold-out yet keeps too few visible
+    genes for the validation one; without early stopping an empty validation set only costs the curve."""
+    masked = mask_index(index, split) if split is not None else index
+    if split is not None:
+        categories, min_known = split.categories, split.min_known_genes
+    else:
+        categories, min_known = ("disease",), BENCHMARK_MIN_KNOWN
+    val_split = make_holdout(masked, categories=categories, min_known_genes=min_known,
+                             hidden_fraction=config.val_fraction, seed=config.val_seed)
+    if not val_split.diseases and config.early_stopping:
+        after = " after the benchmark hold-out" if split is not None else ""
+        raise ValueError(f"no disease keeps {min_known}+ known genes for the validation hold-out{after}, so early "
+                         f"stopping has nothing to validate on; turn off the benchmark hold-out or early stopping, "
+                         f"or use a larger network")
+    return val_split
+
+
 def hetero_model_kwargs(bundle: HeteroBundle, *, hidden: int = 128, layers: int = 2, dropout: float = 0.2,
                         decoder: str = "dot") -> dict:
     return dict(gene_in=bundle.data["gene"].x.size(1), num_traits=len(bundle.trait_list),
@@ -104,7 +131,11 @@ class HeteroTrained:
 
 def train_hetero(bundle: HeteroBundle, index: dict, split: HoldoutSplit | None, model_kwargs: dict,
                  config: HeteroTrainConfig, on_epoch=None) -> HeteroTrained:
-    """Build a seeded model and train it; the returned model is on the CPU with its best weights."""
+    """Build a seeded model and train it; the returned model is on the CPU with its best weights.
+
+    Raises ``ValueError`` (see ``check_validation_split``) before any work when early stopping would have no
+    validation diseases."""
+    check_validation_split(index, split, config)
     torch.manual_seed(config.seed)
     model = HeteroGNNLinkPredictor(**model_kwargs)
     trainer = HeteroTrainer(model, config)

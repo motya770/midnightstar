@@ -87,7 +87,7 @@ def save_hetero_run(manager, *, model, model_kwargs: dict, prepared: HeteroPrepa
     # features=gene_in, epochs_run, auc_roc=val_auc, avg_precision=benchmark hetero recall@50 or val_recall50, model=model.cpu(), model_name)
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Build the toy graph with `make_graph` from `tests/utils/test_hetero_scorer.py` (24 genes in a ring, Asthma on 12 genes, BMI on 8). Every training config in this file uses `HeteroTrainConfig(epochs=3, early_stopping=False)`.
 
@@ -156,19 +156,19 @@ def test_describe_hetero_params_matches_cli_format():
     assert describe_hetero_params(kwargs, config, holdout=False, gpu="A100").endswith("holdout=no, gpu=A100")
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `venv/bin/python -m pytest tests/models/test_hetero_pipeline.py -q`
 Expected: FAIL at import (`No module named src.models.hetero_pipeline`).
 
-- [ ] **Step 3: Implement `src/models/hetero_pipeline.py`** with the Interfaces above. `prepare_hetero_training` counts gene–trait edges with `bundle.data[GENE_TRAIT].edge_index.size(1)`; its two error messages name the fix ("rebuild the network with *Include disease associations*" / "untick the benchmark hold-out or build a larger network").
+- [x] **Step 3: Implement `src/models/hetero_pipeline.py`** with the Interfaces above. `prepare_hetero_training` counts gene–trait edges with `bundle.data[GENE_TRAIT].edge_index.size(1)`; its two error messages name the fix ("rebuild the network with *Include disease associations*" / "untick the benchmark hold-out or build a larger network").
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `venv/bin/python -m pytest tests/models/test_hetero_pipeline.py -q`
 Expected: 7 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/models/hetero_pipeline.py tests/models/test_hetero_pipeline.py
@@ -185,7 +185,7 @@ git commit -m "Extract the hetero training pipeline into src/models/hetero_pipel
 - Consumes: Task 1's `prepare_hetero_training`, `hetero_model_kwargs`, `train_hetero`, `benchmark_hetero`, `describe_hetero_params`, `save_hetero_run`.
 - Produces: unchanged CLI arguments and JSON (`args`, `checkpoint`, `run_id`, `metrics`, `history`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Load the script as a module with `importlib.util.spec_from_file_location("train_hetero_cli", "<repo>/scripts/train_hetero_disease_model.py")`.
 
@@ -207,19 +207,19 @@ def test_cli_reports_a_missing_graph(tmp_path, capsys):
     assert cli.main(["--data-dir", str(tmp_path), "--graph", "nope"]) == 1
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `venv/bin/python -m pytest tests/scripts -q`
 Expected: the first two FAIL (the current `main` works end to end, so they fail only if the pipeline changes behaviour) — if they PASS against the old `main`, that is the finding: the tests pin existing behaviour, note it in the ledger and continue.
 
-- [ ] **Step 3: Rewrite `main` on the pipeline**: `prepare_hetero_training(graph, holdout=not args.no_holdout, min_trait_genes=args.min_trait_genes)`, `hetero_model_kwargs(...)`, `HeteroTrainConfig(...)` as today, `train_hetero(..., on_epoch=None)`, `benchmark_hetero`, `describe_hetero_params(..., holdout=not args.no_holdout)`, `save_hetero_run(manager, ..., out=args.out, save_run=not args.no_save_run)`. Keep the printed lines (graph summary, model/config, training summary, one line per scorer, checkpoint path, run id). The `ValueError`s of `prepare_hetero_training` print to stderr and return 1.
+- [x] **Step 3: Rewrite `main` on the pipeline**: `prepare_hetero_training(graph, holdout=not args.no_holdout, min_trait_genes=args.min_trait_genes)`, `hetero_model_kwargs(...)`, `HeteroTrainConfig(...)` as today, `train_hetero(..., on_epoch=None)`, `benchmark_hetero`, `describe_hetero_params(..., holdout=not args.no_holdout)`, `save_hetero_run(manager, ..., out=args.out, save_run=not args.no_save_run)`. Keep the printed lines (graph summary, model/config, training summary, one line per scorer, checkpoint path, run id). The `ValueError`s of `prepare_hetero_training` print to stderr and return 1.
 
-- [ ] **Step 4: Run the tests and the suite**
+- [x] **Step 4: Run the tests and the suite**
 
 Run: `venv/bin/python -m pytest tests/scripts tests/models/test_hetero_pipeline.py -q` then `venv/bin/python -m pytest -q`
 Expected: all pass; the suite count rises by 10 (169 → 172 including Task 1).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/train_hetero_disease_model.py tests/scripts
@@ -246,7 +246,7 @@ def train_hetero_from_payload(payload: dict, device: str = "cpu", on_epoch=None)
 
 - Produces in `modal_app.py`: `_stage_source(src_code) -> str` (writes the shipped tree to a temp dir and puts it on `sys.path`; `_do_train` uses it too), `_do_train_hetero(payload_bytes: bytes, src_code: dict) -> dict` (cuda when available), `train_hetero_on_gpu` (T4, 3600), `train_hetero_on_a10g` (A10G, 3600), `train_hetero_on_a100` (A100, 7200), `HETERO_TRAIN_FUNCTIONS = {"T4": ..., "A10G": ..., "A100": ...}`; the image adds `"tqdm>=4.66"` and `"scipy>=1.11"`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_payload_round_trip_reproduces_local_training():
@@ -267,19 +267,19 @@ def test_modal_hetero_entrypoint_runs_the_payload_on_cpu():
     assert set(result) >= {"model_state_dict", "history", "metrics", "epochs_run", "device_used"}
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Run: `venv/bin/python -m pytest tests/models/test_hetero_pipeline.py -q -k "payload or modal"`
 Expected: FAIL with ImportError on `hetero_training_payload` / `HETERO_TRAIN_FUNCTIONS`.
 
-- [ ] **Step 3: Implement** the two pipeline functions and the Modal additions. `_do_train_hetero` stages the source, unpickles the payload, picks `"cuda" if torch.cuda.is_available() else "cpu"`, calls `train_hetero_from_payload`.
+- [x] **Step 3: Implement** the two pipeline functions and the Modal additions. `_do_train_hetero` stages the source, unpickles the payload, picks `"cuda" if torch.cuda.is_available() else "cpu"`, calls `train_hetero_from_payload`.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `venv/bin/python -m pytest tests/models/test_hetero_pipeline.py -q`
 Expected: 9 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/models/hetero_pipeline.py src/models/modal_app.py tests/models/test_hetero_pipeline.py
@@ -295,31 +295,31 @@ git commit -m "Hetero training payload and Modal GPU entry points"
 **Interfaces:**
 - Consumes: Task 1 and Task 3 functions; `HETERO_MODEL_TYPE`; `DECODERS`; `NEG_SAMPLING`; `HETERO_TRAIN_FUNCTIONS`, `collect_source_code`, `app` from `modal_app` (imported inside the Modal branch, as today).
 
-- [ ] **Step 1: Model radio.** Fourth option `"Hetero GNN (gene–disease)"` (so `model_type_clean == HETERO_MODEL_TYPE`), help line: "**Hetero GNN** — Learns gene–disease links directly: genes and GWAS traits are nodes of one graph. Its scores appear on the Predictions page under *Ranking score*."
+- [x] **Step 1: Model radio.** Fourth option `"Hetero GNN (gene–disease)"` (so `model_type_clean == HETERO_MODEL_TYPE`), help line: "**Hetero GNN** — Learns gene–disease links directly: genes and GWAS traits are nodes of one graph. Its scores appear on the Predictions page under *Ranking score*."
 
-- [ ] **Step 2: Hetero settings.** In the hetero branch of the model settings expander: `hidden` select_slider `[32, 64, 128, 256]` default 128; `layers` slider 1–3 default 2; `decoder` selectbox `DECODERS`; `dropout` slider 0.0–0.5 step 0.05 default 0.2; `min_trait_genes` slider 1–10 default 1 ("Ignore traits with fewer known genes"); `neg_gene` slider 1–8 default 4 and `neg_trait` slider 0–4 default 1 ("negatives per known pair"); `neg_sampling` selectbox `NEG_SAMPLING`. Caption: "Learns gene–disease links directly; benchmarked against network enrichment when the hold-out is on." In the shared training-settings expander: the epochs slider becomes 10–2000 default 300 for hetero (10–500 default 100 otherwise); mini-batch controls are hidden for hetero; hetero adds `holdout` checkbox default True ("Hold out benchmark pairs (20 % of each disease's known genes) and benchmark against enrichment"), `val_fraction` slider 0.05–0.30 step 0.05 default 0.10, `eval_every` slider 1–20 default 1, `patience` slider 5–50 default 20 ("evaluations without improvement"), and the caption "The edge split under Network Summary applies to protein–protein models; this model holds out disease genes instead."
+- [x] **Step 2: Hetero settings.** In the hetero branch of the model settings expander: `hidden` select_slider `[32, 64, 128, 256]` default 128; `layers` slider 1–3 default 2; `decoder` selectbox `DECODERS`; `dropout` slider 0.0–0.5 step 0.05 default 0.2; `min_trait_genes` slider 1–10 default 1 ("Ignore traits with fewer known genes"); `neg_gene` slider 1–8 default 4 and `neg_trait` slider 0–4 default 1 ("negatives per known pair"); `neg_sampling` selectbox `NEG_SAMPLING`. Caption: "Learns gene–disease links directly; benchmarked against network enrichment when the hold-out is on." In the shared training-settings expander: the epochs slider becomes 10–2000 default 300 for hetero (10–500 default 100 otherwise); mini-batch controls are hidden for hetero; hetero adds `holdout` checkbox default True ("Hold out benchmark pairs (20 % of each disease's known genes) and benchmark against enrichment"), `val_fraction` slider 0.05–0.30 step 0.05 default 0.10, `eval_every` slider 1–20 default 1, `patience` slider 5–50 default 20 ("evaluations without improvement"), and the caption "The edge split under Network Summary applies to protein–protein models; this model holds out disease genes instead."
 
-- [ ] **Step 3: Where to train.** Same radio for all models. For hetero on "This Mac's GPU" the caption reads "For this model the CPU was faster than the Mac GPU in our runs."
+- [x] **Step 3: Where to train.** Same radio for all models. For hetero on "This Mac's GPU" the caption reads "For this model the CPU was faster than the Mac GPU in our runs."
 
-- [ ] **Step 4: Start Training handler.** Replace `if st.button("🚀 Start Training", ...):` with `start_training = st.button(...)`, then `if start_training and model_type_clean == HETERO_MODEL_TYPE: run_hetero_training(...)` and `if start_training and model_type_clean != HETERO_MODEL_TYPE:` guarding the existing block unchanged. `run_hetero_training` (a function defined above the columns in the page) does: `prepare_hetero_training` under a spinner, `st.error` + return on `ValueError`; shows "genes · traits · gene–trait associations (hidden pairs removed)"; builds `hetero_model_kwargs` and `HeteroTrainConfig(epochs, lr, neg_gene, neg_trait, neg_sampling, val_fraction, early_stopping, patience, eval_every, seed, device)`; local path: progress bar + status text + a line chart of loss and validation MRR redrawn every `max(1, epochs // 100)` epochs via `on_epoch`, then `progress_bar.progress(1.0)`; Modal path: `payload_bytes = pickle.dumps(hetero_training_payload(...))`, `with modal_app.run(): result = HETERO_TRAIN_FUNCTIONS[gpu_type].remote(payload_bytes, collect_source_code())`, rebuild the model from `model_kwargs` and `pickle.loads(result["model_state_dict"])`, `st.error` + return on exception; then `benchmark_hetero` under a spinner, `save_hetero_run(manager, ..., graph_name=_saved_graph_name, params=describe_hetero_params(..., gpu=gpu_type))`; shows metrics (validation MRR, recall@50, AUC, epochs run / best epoch), the benchmark table (rows = scorer names, columns recall@50, recall@200, median rank, MRR) when a hold-out was used, a caption comparing the model's recall@50 and MRR with enrichment's, "Model saved (run #id) — <path>", and `st.page_link("pages/4_Results.py", label="📊 Use it under Ranking score on the Predictions page")`. It never calls `session.set_training_results`.
+- [x] **Step 4: Start Training handler.** Replace `if st.button("🚀 Start Training", ...):` with `start_training = st.button(...)`, then `if start_training and model_type_clean == HETERO_MODEL_TYPE: run_hetero_training(...)` and `if start_training and model_type_clean != HETERO_MODEL_TYPE:` guarding the existing block unchanged. `run_hetero_training` (a function defined above the columns in the page) does: `prepare_hetero_training` under a spinner, `st.error` + return on `ValueError`; shows "genes · traits · gene–trait associations (hidden pairs removed)"; builds `hetero_model_kwargs` and `HeteroTrainConfig(epochs, lr, neg_gene, neg_trait, neg_sampling, val_fraction, early_stopping, patience, eval_every, seed, device)`; local path: progress bar + status text + a line chart of loss and validation MRR redrawn every `max(1, epochs // 100)` epochs via `on_epoch`, then `progress_bar.progress(1.0)`; Modal path: `payload_bytes = pickle.dumps(hetero_training_payload(...))`, `with modal_app.run(): result = HETERO_TRAIN_FUNCTIONS[gpu_type].remote(payload_bytes, collect_source_code())`, rebuild the model from `model_kwargs` and `pickle.loads(result["model_state_dict"])`, `st.error` + return on exception; then `benchmark_hetero` under a spinner, `save_hetero_run(manager, ..., graph_name=_saved_graph_name, params=describe_hetero_params(..., gpu=gpu_type))`; shows metrics (validation MRR, recall@50, AUC, epochs run / best epoch), the benchmark table (rows = scorer names, columns recall@50, recall@200, median rank, MRR) when a hold-out was used, a caption comparing the model's recall@50 and MRR with enrichment's, "Model saved (run #id) — <path>", and `st.page_link("pages/4_Results.py", label="📊 Use it under Ranking score on the Predictions page")`. It never calls `session.set_training_results`.
 
-- [ ] **Step 5: Syntax check**
+- [x] **Step 5: Syntax check**
 
 Run: `venv/bin/python -c "import ast,sys; ast.parse(open('pages/3_Model_Training.py').read()); print('ok')"`
 Expected: `ok`.
 
-- [ ] **Step 6: Docs.** Spec Section 6: replace "The Training page gets no new mode in this revision; training is the CLI." with "The Training page offers the model as *Hetero GNN (gene–disease)* (Section 9)." Add "Section 9: Training-page mode (2026-11-08)": controls, compute options (CPU, Mac GPU, Modal T4/A10G/A100 through `train_hetero_on_*`), what is shown, what is saved, the shared pipeline module, and that `training_results` is not set. README: a Hetero GNN bullet in the training-page model list, the hetero section says the page trains it too (any of the three compute options), the test count.
+- [x] **Step 6: Docs.** Spec Section 6: replace "The Training page gets no new mode in this revision; training is the CLI." with "The Training page offers the model as *Hetero GNN (gene–disease)* (Section 9)." Add "Section 9: Training-page mode (2026-11-08)": controls, compute options (CPU, Mac GPU, Modal T4/A10G/A100 through `train_hetero_on_*`), what is shown, what is saved, the shared pipeline module, and that `training_results` is not set. README: a Hetero GNN bullet in the training-page model list, the hetero section says the page trains it too (any of the three compute options), the test count.
 
-- [ ] **Step 7: Run the suite**
+- [x] **Step 7: Run the suite**
 
 Run: `venv/bin/python -m pytest -q`
 Expected: all pass.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add pages/3_Model_Training.py docs/superpowers/specs/2026-03-30-gene-disease-hetero-graph-design.md README.md docs/superpowers/plans/2026-11-08-hetero-training-page.md
 git commit -m "Model Training page: Hetero GNN mode on CPU, Mac GPU or Modal"
 ```
 
-- [ ] **Step 9: Verify in the running app** (port 8521): pick Hetero GNN, train a short run (CPU, 20 epochs, eval every 5) on a saved network, confirm the metrics, the benchmark table, the run row in "Past training runs" and the new option under Ranking score on the Predictions page; then delete the verification run and its checkpoint files. The Modal path is not exercised (it costs money); say so in the report.
+- [x] **Step 9: Verify in the running app** (port 8521): pick Hetero GNN, train a short run (CPU, 20 epochs, eval every 5) on a saved network, confirm the metrics, the benchmark table, the run row in "Past training runs" and the new option under Ranking score on the Predictions page; then delete the verification run and its checkpoint files. The Modal path is not exercised (it costs money); say so in the report.

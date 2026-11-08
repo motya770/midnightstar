@@ -95,7 +95,11 @@ def main(argv=None) -> int:
                                seed=args.seed, device=args.device)
     print(f"decoder={args.decoder}; config: {config}")
 
-    trained = train_hetero(prepared.bundle, prepared.index, split, model_kwargs, config)
+    try:
+        trained = train_hetero(prepared.bundle, prepared.index, split, model_kwargs, config)
+    except ValueError as exc:
+        print(f"cannot train on {args.graph!r} with these settings: {exc}", file=sys.stderr)
+        return 1
     metrics = trained.metrics
     print(f"model: {sum(p.numel() for p in trained.model.parameters()):,} parameters; trained {metrics['epochs_run']} "
           f"epochs in {metrics['train_minutes']} min; best epoch {metrics['best_epoch']}: val MRR {metrics['val_mrr']:.4f}, "

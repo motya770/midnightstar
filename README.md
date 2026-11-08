@@ -235,7 +235,7 @@ when enrichment ranked); the existing columns are unchanged.
 ## 🛠️ Development
 
 ```bash
-pytest                      # 174 tests, CPU only, about 15 s
+pytest                      # 176 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 

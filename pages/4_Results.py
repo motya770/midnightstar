@@ -83,6 +83,11 @@ if results is None:
 
     st.subheader("Select a trained model")
     st.markdown("Choose which model to use for predictions.")
+    hetero_count = len(find_hetero_checkpoints(checkpoint_dir))
+    if hetero_count:
+        st.caption(f"{hetero_count} gene–disease model checkpoint{'s are' if hetero_count > 1 else ' is'} not listed "
+                   "here: load a protein–protein model, then pick it under **Ranking score** in the "
+                   "Predict Disease Genes tab or the export form.")
 
     # Build options list
     options = []
