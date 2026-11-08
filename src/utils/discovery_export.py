@@ -39,7 +39,8 @@ PREDICTED_COLUMN_DOCS = {
     "known_interactor_genes": "Up to ten of those known interactors, separated by ';'",
     "model_score": "Ranking score of the manifest's scorer when a model took part: the heterogeneous gene–disease "
                    "model's logit (scorer hetero-gnn) or the sum of the per-disease z-scores of enrichment_score and "
-                   "that logit (scorer hetero-gnn+enrichment-z); empty when enrichment alone ranked the candidates",
+                   "that logit, each z-scored over all nodes of the network (scorer hetero-gnn+enrichment-z); "
+                   "empty when enrichment alone ranked the candidates",
 }
 KNOWN_COLUMN_DOCS = {
     "disease": "GWAS Catalog trait name",
@@ -70,16 +71,17 @@ HETERO_METHOD_TEXT_NO_PROTEIN = _HETERO_METHOD_HEAD + (
     "the similarity column is empty. Candidates are hypotheses for follow-up."
 )
 _BLEND_METHOD_HEAD = (
-    "Candidates are ranked by the sum of two per-disease z-scores: the hypergeometric enrichment of "
+    "Candidates are ranked by the sum of two per-disease z-scores, each taken over all nodes of the "
+    "network: the hypergeometric enrichment of "
     "known GWAS genes among the gene's STRING partners (enrichment_score, -log10 p) and the logit of a "
     "heterogeneous graph neural network trained on gene–disease links (genes and GWAS traits as nodes, "
     "STRING interactions and GWAS associations as edges). The model_score column is that sum; "
     "enrichment_score "
 )
 _BLEND_METHOD_TAIL = (
-    "On the held-out benchmark this blend recovered slightly more hidden disease genes in the top 50 "
-    "than enrichment alone, while the model alone recovered far fewer. Candidates are hypotheses for "
-    "follow-up."
+    "On the held-out benchmark this blend recovered about as many hidden disease genes in the top 50 as "
+    "enrichment alone or somewhat more (−2 % to +16 % across the checkpoints tried, with mixed "
+    "recall@200), while the model alone recovered far fewer. Candidates are hypotheses for follow-up."
 )
 BLEND_METHOD_TEXT = _BLEND_METHOD_HEAD + "and similarity are kept for reference and break ties. " + _BLEND_METHOD_TAIL
 BLEND_METHOD_TEXT_NO_PROTEIN = _BLEND_METHOD_HEAD + (

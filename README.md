@@ -228,9 +228,10 @@ When a hetero checkpoint exists in `.datasets/trained_models`, the Predictions
 page offers **Ranking score: Network enrichment (default) / Enrichment +
 gene–disease model / Gene–disease model** in the Predict Disease Genes tab and
 the export form. The blend is the benchmark's `hetero+enrichment-z` (the sum of
-the per-disease z-scores of enrichment and the model's logit); across the
-checkpoints tried it recovered 2–11 % more hidden disease genes in the top 50
-than enrichment alone, with mixed recall@200. The model alone is labelled
+the per-disease z-scores of enrichment and the model's logit, each over all
+nodes of the network); across the checkpoints tried it recovered about as many
+hidden disease genes in the top 50 as enrichment alone or somewhat more (−2 % to
++16 %), with mixed recall@200. The model alone is labelled
 *experimental, below enrichment on the benchmark*: it recovers far fewer hidden
 genes and a few genes dominate its top ranks. The export's `manifest.json`
 names the scorer that produced the bundle (`enrichment`,
@@ -249,7 +250,7 @@ protein profiles, say so instead of running.
 ## 🛠️ Development
 
 ```bash
-pytest                      # 180 tests, CPU only, about 15 s
+pytest                      # 184 tests, CPU only, about 15 s
 pytest tests/models         # model and trainer tests, including the training regression suite
 ```
 

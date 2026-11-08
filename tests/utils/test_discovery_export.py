@@ -170,3 +170,15 @@ def test_manifest_records_blend_scorer_method_text():
     assert "z-score" in manifest["method"] and "cosine similarity" not in manifest["method"]
     assert "similarity column is empty" in build_manifest(model_type=None, **kwargs)["method"]
     assert "z-score" in PREDICTED_COLUMN_DOCS["model_score"]
+
+
+def test_blend_method_text_names_the_z_score_population():
+    from src.utils.discovery_export import BLEND_METHOD_TEXT, BLEND_METHOD_TEXT_NO_PROTEIN
+    for text in (BLEND_METHOD_TEXT, BLEND_METHOD_TEXT_NO_PROTEIN, PREDICTED_COLUMN_DOCS["model_score"]):
+        assert "over all nodes of the network" in text
+
+
+def test_blend_method_text_reports_the_benchmark_range_including_the_run_below_enrichment():
+    from src.utils.discovery_export import BLEND_METHOD_TEXT
+    assert "−2 % to +16 %" in BLEND_METHOD_TEXT
+    assert "slightly more" not in BLEND_METHOD_TEXT

@@ -227,9 +227,9 @@ disease_index = index_disease_genes(graph, node_list) if graph else {}
 _CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".datasets", "trained_models")
 SCORER_ENRICHMENT_LABEL = "Network enrichment (default)"
 # On the held-out benchmark (README, "Held-out disease-gene benchmark") the hetero model alone is far
-# below enrichment and its z-score blend with enrichment slightly above it: enrichment stays the
+# below enrichment and its z-score blend with enrichment at or slightly above it: enrichment stays the
 # default, the blend comes next, the model alone is experimental.
-SCORER_BLEND_NOTE = "(z-score blend, slightly above enrichment on the benchmark)"
+SCORER_BLEND_NOTE = "(z-score blend, at or slightly above enrichment on the benchmark)"
 SCORER_HETERO_NOTE = "(experimental, below enrichment on the benchmark)"
 _hetero_paths = list(reversed(find_hetero_checkpoints(_CHECKPOINT_DIR)))
 
@@ -248,8 +248,9 @@ SCORER_HELP = (
     "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the "
     "disease's known genes (the validated default). **Enrichment + gene–disease model** adds, per disease, "
     "the z-score of a heterogeneous graph neural network's score to the z-score of enrichment: on the "
-    "held-out benchmark this blend recovered 2–11 % more hidden disease genes in the top 50 than enrichment "
-    "alone across the checkpoints tried (recall@200 was mixed). **Gene–disease model** ranks by that network "
+    "held-out benchmark this blend recovered about as many hidden disease genes in the top 50 as enrichment "
+    "alone or somewhat more (−2 % to +16 % across the checkpoints tried; recall@200 was mixed). "
+    "**Gene–disease model** ranks by that network "
     "alone; it recovers far fewer hidden genes than enrichment and a few genes dominate its top ranks, so "
     "treat it as experimental. Compare checkpoints with scripts/benchmark_disease_genes.py before trusting one."
 )
