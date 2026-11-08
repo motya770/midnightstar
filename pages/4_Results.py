@@ -18,11 +18,14 @@ from src.utils.discovery import (
     select_diseases,
 )
 from src.utils.discovery_export import (
+    ENRICHMENT_SCORER,
+    HETERO_SCORER,
     PREDICTED_FILE,
     build_manifest,
     write_discovery_bundle,
     zip_bundle,
 )
+from src.utils.hetero_scorer import find_hetero_checkpoints, hetero_score_matrix, load_hetero_checkpoint
 from src.models.gnn import GNNLinkPredictor
 from src.models.graph_transformer import GraphTransformerLinkPredictor
 from src.models.vae import GraphVAE
@@ -174,6 +177,49 @@ st.markdown(
 # Known GWAS associations per trait (exact trait names), shared by the disease tab and the export.
 disease_index = index_disease_genes(graph, node_list) if graph else {}
 
+# ---------------------------------------------------------------------------
+# Ranking scorer: network enrichment by default, or a trained heterogeneous
+# gene–disease model when a checkpoint from scripts/train_hetero_disease_model.py exists.
+# ---------------------------------------------------------------------------
+_CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".datasets", "trained_models")
+SCORER_ENRICHMENT_LABEL = "Network enrichment (default)"
+_hetero_paths = list(reversed(find_hetero_checkpoints(_CHECKPOINT_DIR)))
+scorer_options = [SCORER_ENRICHMENT_LABEL] + [
+    f"Gene–disease model: {os.path.basename(p).replace('_checkpoint.pt', '')}" for p in _hetero_paths
+]
+_scorer_paths = dict(zip(scorer_options[1:], _hetero_paths))
+SCORER_HELP = (
+    "**Network enrichment** ranks by how strongly a gene's STRING partners are enriched for the "
+    "disease's known genes (the validated default). **Gene–disease model** ranks by a heterogeneous graph "
+    "neural network trained on gene–disease links; compare both on the held-out benchmark "
+    "(scripts/benchmark_disease_genes.py) before trusting it."
+)
+
+
+@st.cache_resource(show_spinner="Scoring with the gene–disease model...")
+def _hetero_scores(checkpoint_path, graph_token, diseases_key, _graph):
+    checkpoint = load_hetero_checkpoint(checkpoint_path)
+    return hetero_score_matrix(checkpoint, _graph, list(diseases_key))
+
+
+def scorer_for(label, diseases):
+    """(score matrix or None, scorer name for the manifest, checkpoint path or None)."""
+    if label == SCORER_ENRICHMENT_LABEL or label not in _scorer_paths:
+        return None, ENRICHMENT_SCORER, None
+    path = _scorer_paths[label]
+    try:
+        matrix = _hetero_scores(path, session.get_graph_token(), tuple(diseases), graph)
+    except ValueError as e:
+        st.error(f"The gene–disease checkpoint does not match this network: {e}")
+        st.stop()
+    return matrix, HETERO_SCORER, path
+
+
+def pick_scorer(key):
+    if len(scorer_options) == 1:
+        return SCORER_ENRICHMENT_LABEL
+    return st.selectbox("Ranking score", scorer_options, key=key, help=SCORER_HELP)
+
 
 def find_similar_genes(gene_name, top_k=20):
     if gene_name not in node_to_idx:
@@ -213,7 +259,8 @@ with tab_disease:
         "**Pick a disease** to rank candidate genes by how strongly their STRING interaction "
         "partners are enriched for the disease's known genes (guilt-by-association). Ties, "
         "mostly genes with no known partner, are broken by similarity of the model's learned "
-        "profiles. Candidates are hypotheses for follow-up, not a diagnosis."
+        "profiles. When a trained gene–disease model is available you can rank by its score "
+        "instead. Candidates are hypotheses for follow-up, not a diagnosis."
     )
 
     if disease_index:
@@ -244,11 +291,14 @@ with tab_disease:
                 format_func=lambda x: f"{x} ({len(filtered[x]['genes'])} known genes)",
             )
             top_k = st.slider("How many predictions?", 10, 200, 50)
+            disease_scorer = pick_scorer("disease_scorer")
 
             if st.button("🔮 Predict New Genes", type="primary"):
                 known_genes = sorted(disease_index[selected_disease]["genes"])
+                scores, scorer_name, _ = scorer_for(disease_scorer, [selected_disease])
                 candidates = predict_gene_disease_links(
                     z_norm, node_list, node_to_idx, graph, disease_index, [selected_disease], top_k,
+                    scores=scores,
                 )
 
                 if candidates:
@@ -264,9 +314,13 @@ with tab_disease:
 
                     with col_pred:
                         st.markdown(f"**Candidates ({len(candidates)} genes):**")
-                        st.caption("Enrichment = -log10 p that this many of the gene's partners are known disease genes")
+                        if scorer_name == HETERO_SCORER:
+                            st.caption("Ranked by the gene–disease model's score; enrichment shown for reference")
+                        else:
+                            st.caption("Enrichment = -log10 p that this many of the gene's partners are known disease genes")
                         pred_df = pd.DataFrame([{
                             "Gene": c["gene"],
+                            **({"Model score": c["model_score"]} if scorer_name == HETERO_SCORER else {}),
                             "Enrichment": c["enrichment_score"],
                             "Known interactors": c["known_interactors"],
                             "Similarity": c["similarity"],
@@ -471,6 +525,7 @@ else:
             )
         with col_k:
             exp_top_k = st.slider("Candidates per disease", 10, 200, 50)
+        exp_scorer = pick_scorer("export_scorer")
         exp_dir = st.text_input(
             "Export folder",
             value=os.path.join(_PROJECT_ROOT, ".datasets", "exports"),
@@ -485,8 +540,10 @@ else:
         else:
             try:
                 with st.spinner(f"Scoring candidates for {len(chosen)} diseases..."):
+                    exp_scores, exp_scorer_name, exp_scorer_path = scorer_for(exp_scorer, chosen)
                     links = predict_gene_disease_links(
                         z_norm, node_list, node_to_idx, graph, disease_index, chosen, exp_top_k,
+                        scores=exp_scores,
                     )
                     known = known_links_rows(disease_index, chosen)
                     manifest = build_manifest(
@@ -502,6 +559,8 @@ else:
                         top_k=exp_top_k,
                         links=links,
                         known=known,
+                        scorer=exp_scorer_name,
+                        scorer_checkpoint=exp_scorer_path,
                     )
                     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     bundle = write_discovery_bundle(
