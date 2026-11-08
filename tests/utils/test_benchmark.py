@@ -246,3 +246,73 @@ def test_reference_scorers_runs_named_baselines_and_rejects_unknown_names():
         reference_scorers(["nope"], G, node_list, node_to_idx, index, split, z=z)
     with pytest.raises(ValueError, match="embeddings"):
         reference_scorers(["cosine"], G, node_list, node_to_idx, index, split)
+
+
+# ---- combination scorers and hub concentration ------------------------------
+
+def test_rank_average_is_symmetric_and_orders_by_mean_rank():
+    from src.utils.benchmark import rank_average
+
+    a = np.array([[3.0], [2.0], [1.0], [0.0]])    # ranks 1,2,3,4
+    b = np.array([[0.0], [5.0], [1.0], [9.0]])    # ranks 4,2,3,1
+    combined = rank_average(a, b)
+    assert combined.shape == (4, 1)
+    assert np.allclose(combined, rank_average(b, a))
+    # mean ranks: 2.5, 2.0, 3.0, 2.5 -> row 1 is best, row 2 is worst, rows 0 and 3 tie
+    order = np.argsort(-combined[:, 0], kind="stable")
+    assert order[0] == 1 and order[-1] == 2
+    assert combined[0, 0] == combined[3, 0]
+
+
+def test_zscore_sum_standardises_each_column():
+    from src.utils.benchmark import zscore_sum
+
+    a = np.array([[1.0, 100.0], [2.0, 200.0], [3.0, 300.0]])
+    b = np.array([[30.0, 1.0], [20.0, 1.0], [10.0, 1.0]])    # second column constant: contributes 0
+    combined = zscore_sum(a, b)
+    assert np.allclose(combined[:, 0], 0.0)                    # a and b are exact opposites in column 0
+    expected = (a[:, 1] - a[:, 1].mean()) / a[:, 1].std()
+    assert np.allclose(combined[:, 1], expected)
+
+
+def test_fallback_uses_secondary_only_where_primary_is_zero_and_keeps_it_below():
+    from src.utils.benchmark import fallback
+
+    primary = np.array([[5.0], [0.0], [0.5], [0.0]])
+    secondary = np.array([[100.0], [3.0], [100.0], [-2.0]])
+    combined = fallback(primary, secondary)
+    assert combined[0, 0] == 5.0 and combined[2, 0] == 0.5     # primary kept where non-zero
+    assert combined[1, 0] > combined[3, 0]                      # secondary order preserved
+    assert combined[1, 0] < 0.5                                 # but every fallback score ranks below any primary hit
+
+
+def test_hub_concentration_counts_distinct_top_genes_and_repeat_winners():
+    from src.utils.benchmark import hub_concentration
+
+    G, node_list, node_to_idx, index, split = setup(min_known_genes=5, categories=("disease", "trait"))
+    scores = np.zeros((len(node_list), len(split.diseases)))
+    scores[node_to_idx["G11"], :] = 10.0   # G11 wins every disease
+    stats = hub_concentration(scores, G, node_list, node_to_idx, split, k=3)
+    assert stats["max_rank1"] == len(split.diseases) == 2
+    assert stats["distinct_top10"] <= 2 * 3
+    assert stats["distinct_top10"] >= 3
+
+
+def test_run_benchmark_reports_hub_concentration_in_extra():
+    G, node_list, node_to_idx, index, split = setup()
+    result = run_benchmark(np.zeros((len(node_list), 1)), G, node_list, node_to_idx, index, split)
+    assert set(result.extra) >= {"distinct_top10", "max_rank1"}
+    assert "max rank-1" in result.summary()
+    assert result.to_dict()["max_rank1"] == 1
+
+
+def test_reference_scorers_accepts_hetero_matrix_names():
+    from src.utils.benchmark import HETERO_SCORERS, reference_scorers
+
+    G, node_list, node_to_idx, index, split = setup()
+    hetero = np.random.default_rng(0).normal(size=(len(node_list), 1))
+    results = reference_scorers(list(HETERO_SCORERS), G, node_list, node_to_idx, index, split, hetero_scores=hetero)
+    assert list(results) == list(HETERO_SCORERS)
+    assert all(isinstance(r, BenchmarkResult) for r in results.values())
+    with pytest.raises(ValueError, match="hetero"):
+        reference_scorers(["hetero"], G, node_list, node_to_idx, index, split)

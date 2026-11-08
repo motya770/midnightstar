@@ -116,8 +116,11 @@ class BenchmarkResult:
 
     def summary(self) -> str:
         recalls = "  ".join(f"recall@{k} {v:.4f}" for k, v in self.recall.items())
-        return (f"{recalls}  median rank {self.median_rank:.0f}  MRR {self.mrr:.4f}  "
+        text = (f"{recalls}  median rank {self.median_rank:.0f}  MRR {self.mrr:.4f}  "
                 f"({self.n_hidden} hidden genes, {self.n_diseases} diseases)")
+        if "distinct_top10" in self.extra:
+            text += f"  distinct top-10 {self.extra['distinct_top10']}, max rank-1 {self.extra['max_rank1']}"
+        return text
 
 
 def summarize_ranks(hidden_ranks: dict[str, dict[str, float]], ks=RECALL_KS) -> BenchmarkResult:
@@ -181,13 +184,94 @@ def run_benchmark(scorer, graph, node_list, node_to_idx, index: dict[str, dict],
         masked = mask_index(index, split)
         rows = scorer(z_norm, node_list, node_to_idx, graph, masked, split.diseases, len(node_list))
         hidden_ranks = _ranks_from_links(rows, split)
+        hubs = _hub_from_rows(rows, split)
     else:
         scores = scorer.detach().cpu().numpy() if isinstance(scorer, torch.Tensor) else np.asarray(scorer)
         if scores.shape != (len(node_list), len(split.diseases)):
             raise ValueError(f"Score matrix must be shaped (n_nodes={len(node_list)}, "
                              f"n_diseases={len(split.diseases)}), got {scores.shape}")
         hidden_ranks = _ranks_from_matrix(scores, graph, node_list, node_to_idx, split)
-    return summarize_ranks(hidden_ranks)
+        hubs = hub_concentration(scores, graph, node_list, node_to_idx, split)
+    result = summarize_ranks(hidden_ranks)
+    result.extra.update(hubs)
+    return result
+
+
+# ---- hub concentration -----------------------------------------------------------
+
+HUB_TOP_K = 10
+
+
+def _hub_stats(top_lists: list[list[str]]) -> dict:
+    """distinct genes across the top lists, and the most diseases any gene ranks first for."""
+    firsts: dict[str, int] = {}
+    for genes in top_lists:
+        if genes:
+            firsts[genes[0]] = firsts.get(genes[0], 0) + 1
+    return {
+        "distinct_top10": len({g for genes in top_lists for g in genes}),
+        "max_rank1": max(firsts.values(), default=0),
+    }
+
+
+def hub_concentration(scores: np.ndarray, graph, node_list, node_to_idx, split: HoldoutSplit, k: int = HUB_TOP_K) -> dict:
+    """How concentrated the top-k lists are across diseases: a scorer that puts the same
+    hub genes first for every disease shows few distinct genes and a large max rank-1 count."""
+    gene_mask = _gene_mask(graph, node_list)
+    top_lists = []
+    for j, disease in enumerate(split.diseases):
+        allowed = gene_mask.copy()
+        allowed[[node_to_idx[g] for g in split.visible[disease] if g in node_to_idx]] = False
+        candidates = np.flatnonzero(allowed)
+        order = candidates[np.argsort(-scores[candidates, j], kind="stable")[:k]]
+        top_lists.append([node_list[i] for i in order])
+    return _hub_stats(top_lists)
+
+
+def _hub_from_rows(rows: list[dict], split: HoldoutSplit, k: int = HUB_TOP_K) -> dict:
+    per_disease: dict[str, list[tuple[int, str]]] = {d: [] for d in split.diseases}
+    for row in rows:
+        if row["disease"] in per_disease and row["rank"] <= k:
+            per_disease[row["disease"]].append((row["rank"], row["gene"]))
+    return _hub_stats([[g for _, g in sorted(v)] for v in per_disease.values()])
+
+
+# ---- combining two score matrices ------------------------------------------------
+
+def _column_ranks(matrix: np.ndarray) -> np.ndarray:
+    return np.column_stack([rankdata(-matrix[:, j], method="average") for j in range(matrix.shape[1])]) \
+        if matrix.shape[1] else matrix
+
+
+def rank_average(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Negative mean of the two per-column descending ranks (higher is better)."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    return -(_column_ranks(a) + _column_ranks(b)) / 2.0
+
+
+def zscore_sum(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Sum of per-column z-scores; a constant column contributes nothing."""
+    def z(m):
+        m = np.asarray(m, dtype=float)
+        std = m.std(axis=0, keepdims=True)
+        return np.where(std > 1e-9, (m - m.mean(axis=0, keepdims=True)) / np.maximum(std, 1e-9), 0.0)
+    return z(a) + z(b)
+
+
+def fallback(primary: np.ndarray, secondary: np.ndarray) -> np.ndarray:
+    """``primary`` where it is positive; elsewhere ``secondary``, rescaled per column to sit
+    strictly below the smallest positive primary score while keeping its own order."""
+    primary, secondary = np.asarray(primary, dtype=float), np.asarray(secondary, dtype=float)
+    out = primary.copy()
+    for j in range(primary.shape[1]):
+        hit = primary[:, j] > 0
+        floor = primary[hit, j].min() if hit.any() else 0.0
+        sec = secondary[~hit, j]
+        if sec.size:
+            span = sec.max() - sec.min()
+            scaled = (sec - sec.min()) / span if span > 0 else np.zeros_like(sec)
+            out[~hit, j] = floor - 1.0 + 0.999 * scaled
+    return out
 
 
 # ---- reference scorers ---------------------------------------------------------
@@ -211,31 +295,56 @@ def centroid_cosine_matrix(z, node_list, node_to_idx, index: dict[str, dict], di
     return (z_norm @ torch.stack(signatures, dim=1)).numpy()
 
 
-REFERENCE_SCORERS = ("enrichment", "cosine", "centred-cosine")
+EMBEDDING_SCORERS = ("cosine", "centred-cosine")
+HETERO_SCORERS = ("hetero", "hetero+enrichment", "hetero+enrichment-z", "enrichment>hetero")
+REFERENCE_SCORERS = ("enrichment",) + EMBEDDING_SCORERS + HETERO_SCORERS
 
 
 def reference_scorers(names, graph, node_list, node_to_idx, index: dict[str, dict], split: HoldoutSplit,
-                      z=None) -> dict[str, BenchmarkResult]:
-    """Benchmark the named baselines: the production enrichment ranking, centroid
-    cosine on raw embeddings and centroid cosine on mean-centred embeddings."""
-    from src.utils.discovery import predict_gene_disease_links
+                      z=None, hetero_scores=None) -> dict[str, BenchmarkResult]:
+    """Benchmark the named scorers.
+
+    ``enrichment`` is the production ranking; ``cosine`` / ``centred-cosine`` need the
+    protein–protein embeddings ``z``; ``hetero`` and its combinations with enrichment
+    (rank average, z-score sum, enrichment with the model as fallback for genes with
+    no known partner) need the hetero model's ``hetero_scores`` matrix.
+    """
+    from src.utils.discovery import enrichment_matrix, predict_gene_disease_links
 
     unknown = [n for n in names if n not in REFERENCE_SCORERS]
     if unknown:
         raise ValueError(f"unknown scorer(s) {unknown}; choose from {list(REFERENCE_SCORERS)}")
-    needs_z = [n for n in names if n != "enrichment"]
+    needs_z = [n for n in names if n in EMBEDDING_SCORERS]
     if needs_z and z is None:
         raise ValueError(f"{needs_z} need model embeddings (z); pass a checkpoint")
+    needs_hetero = [n for n in names if n in HETERO_SCORERS]
+    if needs_hetero and hetero_scores is None:
+        raise ValueError(f"{needs_hetero} need the hetero model's score matrix; pass a hetero checkpoint")
 
     masked = mask_index(index, split)
+    enrichment = None
+    if any(n in HETERO_SCORERS and n != "hetero" for n in names):
+        enrichment = enrichment_matrix(graph, node_list, node_to_idx, masked, split.diseases)
+    if hetero_scores is not None:
+        hetero_scores = np.asarray(hetero_scores, dtype=float)
+
     results = {}
     for name in names:
         if name == "enrichment":
             z_norm = F.normalize(z.detach().cpu().float(), dim=-1) if z is not None else torch.zeros(len(node_list), 1)
             results[name] = run_benchmark(predict_gene_disease_links, graph, node_list, node_to_idx, index, split,
                                           z_norm=z_norm)
-        else:
+            continue
+        if name in EMBEDDING_SCORERS:
             matrix = centroid_cosine_matrix(z, node_list, node_to_idx, masked, split.diseases,
                                             centre=(name == "centred-cosine"))
-            results[name] = run_benchmark(matrix, graph, node_list, node_to_idx, index, split)
+        elif name == "hetero":
+            matrix = hetero_scores
+        elif name == "hetero+enrichment":
+            matrix = rank_average(hetero_scores, enrichment)
+        elif name == "hetero+enrichment-z":
+            matrix = zscore_sum(hetero_scores, enrichment)
+        else:  # enrichment>hetero
+            matrix = fallback(enrichment, hetero_scores)
+        results[name] = run_benchmark(matrix, graph, node_list, node_to_idx, index, split)
     return results

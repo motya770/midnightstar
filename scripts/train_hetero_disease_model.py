@@ -25,7 +25,7 @@ import torch  # noqa: E402
 from src.data.bulk_datasets import DATA_DIR_DEFAULT, BulkDatasetManager  # noqa: E402
 from src.models.hetero_gnn import DECODERS, HeteroGNNLinkPredictor  # noqa: E402
 from src.models.hetero_trainer import NEG_SAMPLING, HeteroTrainConfig, HeteroTrainer  # noqa: E402
-from src.utils.benchmark import make_holdout, reference_scorers  # noqa: E402
+from src.utils.benchmark import HETERO_SCORERS, make_holdout, reference_scorers  # noqa: E402
 from src.utils.discovery import index_disease_genes  # noqa: E402
 from src.utils.hetero_graph_features import TRAIT_CATEGORIES, GENE_GENE, GENE_TRAIT, nx_to_hetero_data  # noqa: E402
 from src.utils.hetero_scorer import HETERO_MODEL_TYPE, save_hetero_checkpoint  # noqa: E402
@@ -108,10 +108,11 @@ def main(argv=None) -> int:
 
     results = {}
     if split is not None:
-        results["hetero"] = trainer.evaluate(split)
-        results.update(reference_scorers(["enrichment"], graph, node_list, node_to_idx, index, split))
+        results = reference_scorers(["enrichment", *HETERO_SCORERS], graph, node_list, node_to_idx, index, split,
+                                    hetero_scores=trainer.score_matrix(split.diseases))
+        width = max(len(n) for n in results)
         for name, result in results.items():
-            print(f"{name:12s} {result.summary()}")
+            print(f"{name:{width}s}  {result.summary()}")
         metrics["benchmark"] = {name: result.to_dict() for name, result in results.items()}
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

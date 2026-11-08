@@ -11,6 +11,12 @@ Examples (run from the repo root):
     python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
         --checkpoint .datasets/trained_models/gnn_20261030_012253_checkpoint.pt \
         --scorers enrichment,cosine,centred-cosine --json benchmark.json
+    python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
+        --hetero-checkpoint .datasets/trained_models/hetero_gnn_<stamp>_checkpoint.pt
+
+With a hetero checkpoint the benchmark uses the split stored in it, so the model
+is scored on exactly the pairs it never saw; a checkpoint trained with
+--no-holdout has no such split and is refused.
 """
 import argparse
 import json
@@ -23,8 +29,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch  # noqa: E402
 
 from src.data.bulk_datasets import DATA_DIR_DEFAULT, BulkDatasetManager  # noqa: E402
-from src.utils.benchmark import REFERENCE_SCORERS, make_holdout, reference_scorers  # noqa: E402
+from src.utils.benchmark import (  # noqa: E402
+    EMBEDDING_SCORERS, HETERO_SCORERS, REFERENCE_SCORERS, HoldoutSplit, make_holdout, reference_scorers,
+)
 from src.utils.discovery import index_disease_genes  # noqa: E402
+from src.utils.hetero_scorer import hetero_score_matrix, load_hetero_checkpoint  # noqa: E402
 
 
 def load_embeddings(checkpoint_path: str, graph):
@@ -54,6 +63,7 @@ def main(argv=None) -> int:
     parser.add_argument("--data-dir", default=DATA_DIR_DEFAULT, help="MidnightStar .datasets folder")
     parser.add_argument("--graph", default="full_s800_gwas", help="saved graph name")
     parser.add_argument("--checkpoint", help="protein–protein checkpoint whose embeddings the cosine scorers use")
+    parser.add_argument("--hetero-checkpoint", help="hetero gene–disease checkpoint for the hetero scorers")
     parser.add_argument("--scorers", default=None,
                         help=f"comma-separated subset of {','.join(REFERENCE_SCORERS)} "
                              "(default: all that the inputs allow)")
@@ -74,6 +84,19 @@ def main(argv=None) -> int:
     index = index_disease_genes(graph, node_list)
     split = make_holdout(index, categories=args.categories.split(","), min_known_genes=args.min_known,
                          hidden_fraction=args.hidden_fraction, seed=args.seed)
+    hetero_checkpoint = None
+    if args.hetero_checkpoint:
+        hetero_checkpoint = load_hetero_checkpoint(args.hetero_checkpoint)
+        if not hetero_checkpoint.get("split"):
+            print(f"{args.hetero_checkpoint} was trained without a hold-out (--no-holdout); its benchmark "
+                  f"numbers would be leaked, so it cannot be benchmarked", file=sys.stderr)
+            return 1
+        stored = HoldoutSplit.from_dict(hetero_checkpoint["split"])
+        if stored != split:
+            print(f"note: using the split stored in the hetero checkpoint (seed {stored.seed}, "
+                  f"{stored.min_known_genes}+ known genes, {stored.hidden_fraction:.0%} hidden) instead of the "
+                  f"command-line parameters, so the model is scored on pairs it never saw")
+            split = stored
     n_hidden = sum(len(g) for g in split.hidden.values())
     n_genes = sum(1 for n in node_list if graph.nodes[n].get("node_type") == "gene")
     print(f"{args.graph}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges; "
@@ -85,13 +108,23 @@ def main(argv=None) -> int:
         z, model_type = load_embeddings(args.checkpoint, graph)
         print(f"embeddings: {model_type} {tuple(z.shape)} from {args.checkpoint}")
 
+    hetero_scores = None
+    if hetero_checkpoint is not None:
+        started = time.time()
+        hetero_scores = hetero_score_matrix(hetero_checkpoint, graph, split.diseases, honest=True)
+        print(f"hetero scores: {hetero_scores.shape} from {args.hetero_checkpoint} ({time.time() - started:.0f}s)")
+
     if args.scorers:
         names = args.scorers.split(",")
     else:
-        names = list(REFERENCE_SCORERS) if z is not None else ["enrichment"]
+        names = ["enrichment"]
+        if z is not None:
+            names += list(EMBEDDING_SCORERS)
+        if hetero_scores is not None:
+            names += list(HETERO_SCORERS)
 
     started = time.time()
-    results = reference_scorers(names, graph, node_list, node_to_idx, index, split, z=z)
+    results = reference_scorers(names, graph, node_list, node_to_idx, index, split, z=z, hetero_scores=hetero_scores)
     width = max(len(n) for n in names)
     for name, result in results.items():
         print(f"{name:{width}s}  {result.summary()}")
@@ -101,6 +134,7 @@ def main(argv=None) -> int:
         payload = {
             "graph": args.graph,
             "checkpoint": args.checkpoint,
+            "hetero_checkpoint": args.hetero_checkpoint,
             "model_type": model_type,
             "split": {k: v for k, v in split.to_dict().items() if k not in ("visible", "hidden")},
             "n_hidden": n_hidden,
