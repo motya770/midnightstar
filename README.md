@@ -160,6 +160,7 @@ python scripts/benchmark_disease_genes.py --graph full_s800_gwas \
 | Scorer | recall@50 | recall@200 | median rank | MRR | distinct genes in top-10 | max rank-1 |
 |---|---|---|---|---|---|---|
 | Enrichment (production ranking) | 0.042 | 0.083 | 5740 | 0.086 | 1470 | 6 |
+| Enrichment without a protein model (no similarity tie-break, ties averaged) | 0.042 | 0.083 | 10586 | 0.085 | 1480 | 6 |
 | Trait co-association (`coassociation`) | **0.260** | **0.403** | 681 | **0.479** | 1234 | 7 |
 | Trait co-association, strict (`coassociation-strict`) | 0.193 | 0.298 | 2411 | 0.380 | 1186 | 9 |
 | Centroid cosine, mean-centred embeddings (`gnn_20261030_012253`) | 0.022 | 0.063 | 5135 | 0.043 | 662 | 13 |
@@ -188,9 +189,11 @@ hub genes. Part of the gain comes from GWAS Catalog alias traits ("diabetes
 mellitus" next to "type 2 diabetes mellitus"): the strict row drops every
 trait that shares a word with the disease name and still recovers 19 %.
 Adding STRING signals to co-association (smoothing over partners, z-score
-sums or rank averages with enrichment) did not improve on it. Both rows were
-measured without embeddings, so genes tied on both scores share their average
-rank; the design is in
+sums or rank averages with enrichment) did not improve on it. The two
+co-association rows and the second enrichment row were measured without
+embeddings, so genes tied on every score share their average rank (which is
+why that enrichment row's median rank is 10586, not 5740): compare the
+co-association rows with it; the design is in
 `docs/superpowers/specs/2026-11-08-trait-coassociation-scorer-design.md`.
 
 The heterogeneous model's checkpoint (dot decoder, learning rate 1e-3,
