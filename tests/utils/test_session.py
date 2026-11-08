@@ -11,3 +11,12 @@ def test_set_graph_issues_a_new_token_per_graph(monkeypatch):
     session.set_graph(nx.Graph(), name="b")
     second = session.get_graph_token()
     assert first and second and first != second
+
+
+def test_no_protein_model_flag_defaults_to_false_and_round_trips(monkeypatch):
+    monkeypatch.setattr(session.st, "session_state", {})
+    assert session.get_no_protein_model() is False
+    session.set_no_protein_model(True)
+    assert session.get_no_protein_model() is True
+    session.set_no_protein_model(False)
+    assert session.get_no_protein_model() is False
