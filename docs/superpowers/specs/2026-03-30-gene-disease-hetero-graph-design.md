@@ -1,166 +1,117 @@
-# Gene-Disease Heterogeneous Graph Link Prediction
+# Gene–Disease Heterogeneous Graph Link Prediction
 
-**Date:** 2026-03-30
-**Status:** Approved
+**Date:** 2026-03-30, revised 2026-11-08
+**Status:** Approved (revision approved 2026-11-08; defaults confirmed by the user, who asked to proceed without further questions)
 
 ## Problem
 
-The current pipeline trains link prediction on protein-protein edges only. Disease gene prediction is a post-hoc cosine similarity heuristic over gene embeddings — not a trained predictor. The model never sees gene-disease associations as training signal, so it cannot learn disease-specific patterns.
+The current pipeline trains link prediction on protein–protein edges only. Disease-gene prediction is a post-hoc heuristic over the resulting embeddings. The scoring review of 2026-11-08 measured this on a held-out benchmark (`src/utils/benchmark.py`): ranking genes by cosine similarity to a disease's mean embedding recovers hidden known genes at recall@50 0.007 (chance 0.0025) and is dominated by hub genes; plain network guilt-by-association (hypergeometric enrichment of known genes among a gene's STRING partners) reaches 0.042 and is now the production ranking. The models learn who interacts with whom, not who is involved in the same disease, and their protein–protein AUC says nothing about disease ranking.
 
 ## Goal
 
-Add a new graph type and model pipeline for **bidirectional gene-disease link prediction**:
-- Given a disease, rank candidate genes
-- Given a gene, rank candidate diseases
+Train a model on the objective we care about, **which genes are involved in the same disease**, and measure it on the same benchmark:
 
-This is fully additive — nothing in the existing protein-protein pipeline is modified.
+- Given a disease, rank candidate genes (the Predictions page and the export bundle).
+- Given a gene, rank candidate diseases (available through the same decoder; no UI in this revision).
 
-## Approach: Heterogeneous Graph with HeteroConv
+Acceptance is the benchmark, not AUC: enrichment stays the default scorer unless the model beats recall@50 0.042 / MRR 0.086 on the same held-out split. The combination of the model's score with enrichment is reported too.
 
-Build a bipartite graph with two node types and two edge types. Use PyG's `HeteroData` and `HeteroConv` to learn separate relation patterns for protein interactions and gene-disease associations.
-
----
-
-## Section 1: Graph Construction
-
-**New method:** `build_disease_graph()` on `BulkDatasetManager`.
-
-**Node types:**
-- **gene** (~20K nodes from HPA/STRING) — Features: GTEx expression, AlphaFold structure, HPA annotations. Same enrichment as existing `build_full_graph`.
-- **disease** (5K-15K nodes, one per unique GWAS mapped trait) — Features: ontology category (one-hot over disease/phenotype/measurement/trait/biological_process/other = 6 dims), log(associated gene count), mean association score, max association score. ~9 features total.
-
-**Edge types:**
-- **gene-gene** (protein-protein) — from STRING, same logic as `build_full_graph`. Confidence threshold configurable.
-- **gene-disease** — from GWAS. One edge per (gene, trait) pair meeting the p-value threshold. Edge weight = `-log10(p-value) / 50`, clamped to [0, 1].
-
-**No disease-disease edges.** GWAS does not provide direct disease-disease relationships.
-
-**Key difference from existing graphs:** The existing `build_full_graph` stores GWAS as node features on genes. The new builder stores GWAS as explicit edges to disease nodes. Gene nodes in the disease graph do NOT carry GWAS token features — the GWAS signal is structural.
-
-**Graph type marker:** `G.graph["type"] = "gene-disease"` stored as a graph-level attribute. Existing graphs get `G.graph["type"] = "protein-protein"` (set on load if missing, for backwards compatibility).
+Everything is additive. The protein–protein pipeline is unchanged except for the optional `scores` argument on `predict_gene_disease_links` and one appended export column.
 
 ---
 
-## Section 2: Graph-to-Tensor Conversion
+## Section 1: Graph construction — from the saved graph, not from SQLite
 
-**New file:** `src/utils/hetero_graph_features.py`
-**New function:** `nx_to_hetero_pyg_data(G)`
+The March draft added `build_disease_graph()` on `BulkDatasetManager`. This revision instead converts the **existing saved protein–protein graph** (`full_s800_gwas` and friends), whose gene nodes already carry the GWAS associations as a `gwas` attribute. Reasons: no SQLite rebuild, the gene set and STRING edges are exactly those of the benchmark and the production scorer, and every saved graph works.
 
-Returns a PyG `HeteroData` object:
+**Node types**
 
-- `data['gene'].x` — gene feature matrix. Tissue expression + AlphaFold (plddt, disorder, seq_len) + degree. Same normalization as `nx_to_pyg_data`, but only gene nodes.
-- `data['disease'].x` — disease feature matrix. One-hot category (6 dims) + log(gene_count) + mean_score + max_score. ~9 features.
-- `data['gene', 'interacts', 'gene'].edge_index` — STRING edges (bidirectional).
-- `data['gene', 'associated', 'disease'].edge_index` — GWAS gene-disease edges.
-- `data['disease', 'rev_associated', 'gene'].edge_index` — reverse edges for message passing.
+- `gene` (20,306 on `full_s800_gwas`). Features as in `nx_to_pyg_data`: GTEx expression per tissue (54), AlphaFold (mean pLDDT / 100, disordered fraction, sequence length / 5000) when present, STRING degree (normalised). No GWAS tokens: the GWAS signal is structural.
+- `trait` (14,286). **All** GWAS traits become nodes, not only the 724 of category *disease*. Trait and measurement associations are 93 % of the 305,152 gene–trait pairs (a gene's BMI or lipid associations are what predicts type 2 diabetes genes), so they are both message-passing context and training signal. Features: category one-hot over `disease, trait, phenotype, measurement, biological_process, other` (6 dims) plus a learnable per-trait embedding inside the model. No gene-count or score statistics: they would have to be recomputed from the training edges to avoid leakage, and the embedding carries the same information.
 
-**Return value:** `(hetero_data, gene_list, disease_list, gene_to_idx, disease_to_idx)`
+**Edge types**
 
-No GWAS token encoding on this path.
+- `('gene', 'interacts', 'gene')`: STRING edges, both directions. Message passing only, never a prediction target.
+- `('gene', 'has', 'trait')` and `('trait', 'rev_has', 'gene')`: one pair per (gene, trait) association in the `gwas` attribute, with `edge_weight` = the GWAS score (already `-log10 p / 50` clamped to [0, 1]).
 
----
+No trait–trait edges. Traits with fewer than `min_trait_genes` genes can be dropped from the graph (default: keep all; knob provided because 1–2-gene traits dominate the node count).
 
-## Section 3: Model
+**Hold-out integration (critical).** The converter takes an optional set of (gene, trait) pairs to **exclude entirely**: those edges appear in neither direction of the message-passing graph and in no label set. The training CLI passes the benchmark split's hidden pairs (`make_holdout(index)` with the default protocol), so the trained model has never seen the pairs the benchmark asks it to recover. The split is saved in the checkpoint and the benchmark is run with that split, never a fresh one.
 
-**New file:** `src/models/hetero_gnn.py`
-**New class:** `HeteroGNNLinkPredictor`
-
-**Architecture:**
-
-Input projection: separate `nn.Linear` for gene features and disease features, both projecting to `hidden_channels`.
-
-Message passing: `HeteroConv` wrapping `SAGEConv` per edge type:
-- `SAGEConv` for `('gene', 'interacts', 'gene')`
-- `SAGEConv` for `('gene', 'associated', 'disease')`
-- `SAGEConv` for `('disease', 'rev_associated', 'gene')`
-
-Sum aggregation across relation types for nodes receiving messages from multiple edge types. Stacked `num_layers` deep with ReLU + LayerNorm between layers.
-
-**Decoder:** Dot product — `score = (z_gene[src] * z_disease[dst]).sum(dim=-1)` with sigmoid. Both node types are projected into the same `hidden_channels` space by the input projections and message passing layers, so the dot product captures learned similarity.
-
-**Interface:**
-- `encode(data) -> (z_gene, z_disease)` — separate embedding tensors per node type
-- `decode(z_gene, z_disease, src, dst) -> scores` — sigmoid probabilities
-- `decode_logits(z_gene, z_disease, src, dst) -> logits` — raw logits for loss
-
-No RWSE, no GWAS tokens on this model. The graph structure carries the GWAS signal.
+**Output:** a `HeteroBundle` with the PyG `HeteroData`, `node_list` / `node_to_idx` (sorted gene nodes, identical to `nx_to_pyg_data`'s order for graphs with gene nodes only), and `trait_list` / `trait_to_idx` (sorted trait names). The checkpoint stores `trait_list`; loading verifies it matches the graph.
 
 ---
 
-## Section 4: Trainer
+## Section 2: Model
 
-**New file:** `src/models/hetero_trainer.py`
-**New classes:** `HeteroTrainConfig`, `HeteroTrainer`
+`src/models/hetero_gnn.py`, class `HeteroGNNLinkPredictor`.
 
-**Split strategy:** Only gene-disease edges are split into train/val/test. Gene-gene (STRING) edges remain in the message-passing graph at all times — they are structural context, not prediction targets.
+- Input projections: `Linear(gene_in, hidden)` for genes; for traits `Embedding(num_traits, hidden)` added to `Linear(trait_in, hidden)` of the one-hot category.
+- Message passing: `num_layers` (default 2) `HeteroConv` layers, `SAGEConv` per edge type, `aggr="sum"` across relations, `LayerNorm` + `ReLU` + dropout (default 0.2) between layers, none after the last.
+- Decoder, selectable: `"dot"` (default) = dot product plus a learnable per-trait bias; `"bilinear"` = `z_gene · W · z_trait` + bias; `"mlp"` = 2-layer MLP on `[z_gene, z_trait, z_gene * z_trait]`. The alternatives exist because the dot-product decoder on the protein–protein GNN collapsed the embedding space and produced the hub artifact; if the hetero model's top-10 lists are again dominated by a few genes, try them before concluding the approach fails.
+- Interface: `encode(data) -> (z_gene, z_trait)`; `decode_logits(z_gene, z_trait, gene_idx, trait_idx) -> logits`; `decode(...) -> sigmoid`; `score_matrix(z_gene, z_trait, trait_idx) -> (n_genes, len(trait_idx))` logits, the ranking score.
 
-**Negative sampling:** For each positive (gene, disease) pair, sample negatives by corrupting one side:
-- Corrupt gene: replace with a random gene not associated with that disease
-- Corrupt disease: replace with a random disease the gene is not associated with
-- 1:1 ratio of both corruption types
-
-Negatives are sampled against ALL positive gene-disease edges (not just the current split) to avoid false negatives.
-
-**Training loop:** Full-batch by default. Mini-batch option for large graphs. Same early stopping, epoch callbacks, and metric reporting as existing trainer.
-
-**Evaluation metrics:**
-- ROC-AUC and Average Precision (same as existing)
-- Hits@K: fraction of true edges appearing in top K predictions per disease. More interpretable for discovery use case.
-
-**Config:** `HeteroTrainConfig` dataclass — similar to `TrainConfig` but without GWAS token params and with `neg_sampling_strategy` field.
+Hidden size default 128.
 
 ---
 
-## Section 5: UI Integration
+## Section 3: Trainer
 
-### Training page (`3_Model_Training.py`)
+`src/models/hetero_trainer.py`, `HeteroTrainConfig` and `HeteroTrainer`.
 
-New graph mode added to the radio selector: **"Gene-Disease network"**.
-
-When selected, shows STRING confidence threshold and GWAS p-value threshold with a note explaining this builds a heterogeneous graph for gene-disease discovery.
-
-Model selection is gated by graph type:
-- Protein-protein graph loaded: shows GNN, Graph Transformer, VAE (existing)
-- Gene-disease graph loaded: shows only "Heterogeneous GNN" (new)
-
-### Results page (`4_Results.py`)
-
-When a hetero model is loaded, the tabs become:
-
-1. **"Predict Disease Genes"** — uses `model.decode(z_gene, z_disease, ...)` with real trained scores. Pick a disease, get ranked gene predictions. Replaces the cosine heuristic.
-2. **"Predict Gene Diseases"** — reverse direction. Pick a gene, get ranked disease predictions.
-3. **"Check Gene-Disease Link"** — enter a gene and disease, get the model's predicted association score.
-
-Existing protein-protein model tabs remain unchanged. Graph type detection via `G.graph["type"]` and checkpoint metadata drives which UI renders.
+- **Targets:** gene–trait edges only. STRING edges are always in the message-passing graph.
+- **Validation:** from the visible known genes of the benchmark diseases, a second seeded hold-out (`hidden_fraction` 0.1, seed 1, same protocol) gives validation (gene, disease) pairs. They are removed from the training edges (messages and labels). Early stopping monitors validation **MRR** computed with `run_benchmark` on the model's score matrix (patience 20, best weights restored). Validation AUC against gene-corrupted negatives is also recorded so the run fits the existing training-runs table.
+- **Per-epoch edge masking:** each epoch a fresh random 30 % of training gene–trait edges are supervision targets and the other 70 % carry messages (both directions). The model never scores an edge it can see, and every edge is supervised over time.
+- **Negatives:** per positive (g, t), 4 negatives with a corrupted gene and 1 with a corrupted trait (uniform by default; `neg_sampling="degree"` draws genes proportionally to their gene–trait degree, the degree-aware option). Negatives that coincide with any known edge of the bundle are dropped (no filtering against the benchmark's hidden pairs: the trainer does not know them).
+- **Loss / optimiser:** BCE with logits; Adam, lr 1e-3, weight decay 1e-5; full batch; up to 300 epochs; seed 42; `device` cpu or mps (0.44 s / 0.34 s per epoch at full size).
+- `train(bundle, index, split, on_epoch=None) -> history` and `evaluate(split) -> BenchmarkResult`.
 
 ---
 
-## Section 6: Testing
+## Section 4: Training CLI and checkpoint
 
-**New test files with semantic assertions:**
+`scripts/train_hetero_disease_model.py`: loads a saved graph, builds the benchmark split (or none with `--no-holdout`, for a production model after the honest one has been validated), converts, trains, benchmarks and saves `.datasets/trained_models/hetero_gnn_<stamp>_checkpoint.pt` with `model_class`, `model_kwargs`, `model_state`, `model_type = "Hetero GNN"`, `graph_name`, `train_config`, `split` (`HoldoutSplit.to_dict()`, or null), `trait_list`, `metrics` (validation and benchmark numbers), and records a training run in the database.
+
+`src/utils/hetero_scorer.py`: `load_hetero_checkpoint(path)` and `hetero_score_matrix(checkpoint, graph, diseases, honest=False)`, the shared way to get a (n_nodes × n_diseases) score matrix in `node_list` order for the benchmark CLI and the Results page. `honest=True` excludes the checkpoint's hidden pairs from the message-passing graph (benchmark); production scoring uses every known edge.
+
+---
+
+## Section 5: Benchmark additions
+
+`scripts/benchmark_disease_genes.py` gains `--hetero-checkpoint` and the scorers `hetero`, `hetero+enrichment` (average of ranks), `hetero+enrichment-z` (sum of per-disease z-scores) and `enrichment>hetero` (enrichment where it is non-zero, the model for genes with no known partner). Every result also reports **hub concentration**: distinct genes in the top-10 lists across diseases and the largest number of diseases any one gene ranks first for.
+
+---
+
+## Section 6: Production integration (only if the model beats enrichment)
+
+- `predict_gene_disease_links(..., scores=None)`: with a (n_nodes × n_diseases) matrix, rank by it, then enrichment, then cosine; each row gains `model_score` (empty when ranking by enrichment). **Existing columns are unchanged; `model_score` is appended.**
+- `build_manifest(..., scorer="enrichment", scorer_checkpoint=None)`: the manifest's `scorer` block and method text name which scorer produced the bundle; the README in the bundle shows it.
+- Results page: when a hetero checkpoint exists in `.datasets/trained_models`, the Predict Disease Genes tab and the export form offer **Ranking score: Network enrichment (default) / Hetero gene–disease model**. The Training page gets no new mode in this revision; training is the CLI.
+
+If the model does not beat enrichment, the scorer stays available in the CLI and the benchmark only.
+
+---
+
+## Section 7: Testing
 
 | File | Tests |
 |------|-------|
-| `tests/data/test_disease_graph.py` | `build_disease_graph()` with small SQLite fixture. Asserts node types, edge types, feature shapes, p-value filtering. |
-| `tests/utils/test_hetero_graph_features.py` | `nx_to_hetero_pyg_data()`. Asserts tensor shapes, bidirectional edges, normalization, no NaN, separate index mappings. |
-| `tests/models/test_hetero_gnn.py` | Forward pass, encode, decode on synthetic HeteroData. Asserts shapes, score bounds, gradient flow. |
-| `tests/models/test_hetero_trainer.py` | Training epochs, early stopping, metric validity, negative sampling correctness, gene-gene edges preserved across splits. |
+| `tests/utils/test_hetero_graph_features.py` | node/trait indexing, feature shapes, STRING edges bidirectional, gene–trait edges and weights, excluded pairs absent in both directions, `min_trait_genes`, trait-list check |
+| `tests/models/test_hetero_gnn.py` | encode shapes, decoder variants, score bounds, score matrix equals decoder, gradients flow to trait embeddings |
+| `tests/models/test_hetero_trainer.py` | runs epochs, hidden pairs never appear in supervision or messages, validation pairs removed from training, negatives never coincide with known edges, early stopping restores best, evaluate returns a `BenchmarkResult` |
+| `tests/utils/test_hetero_scorer.py` | checkpoint round trip, score-matrix shape and order, honest mode drops hidden edges |
+| `tests/utils/test_benchmark.py` | combination scorers, hub concentration |
+| `tests/utils/test_discovery.py`, `test_discovery_export.py` | `scores` ranking and `model_score`, manifest scorer block, appended column |
 
----
-
-## New Files Summary
+## New / modified files
 
 | File | Purpose |
 |------|---------|
-| `src/data/bulk_datasets.py` | New `build_disease_graph()` method (additive) |
-| `src/utils/hetero_graph_features.py` | `nx_to_hetero_pyg_data()` |
+| `src/utils/hetero_graph_features.py` | `nx_to_hetero_data()` |
 | `src/models/hetero_gnn.py` | `HeteroGNNLinkPredictor` |
-| `src/models/hetero_trainer.py` | `HeteroTrainer` + `HeteroTrainConfig` |
-| `pages/3_Model_Training.py` | New graph mode + model gating (additive) |
-| `pages/4_Results.py` | Trained decode for predictions + reverse tab (additive) |
-| `tests/data/test_disease_graph.py` | Graph builder tests |
-| `tests/utils/test_hetero_graph_features.py` | Conversion tests |
-| `tests/models/test_hetero_gnn.py` | Model tests |
-| `tests/models/test_hetero_trainer.py` | Trainer tests |
-
-Nothing in the existing protein-protein pipeline is modified.
+| `src/models/hetero_trainer.py` | `HeteroTrainer`, `HeteroTrainConfig` |
+| `src/utils/hetero_scorer.py` | checkpoint loading and score matrices |
+| `scripts/train_hetero_disease_model.py` | training CLI |
+| `scripts/benchmark_disease_genes.py` | hetero and combination scorers, hub concentration |
+| `src/utils/benchmark.py` | combination helpers, hub concentration |
+| `src/utils/discovery.py`, `src/utils/discovery_export.py`, `pages/4_Results.py` | optional model scorer, appended column, manifest scorer |
