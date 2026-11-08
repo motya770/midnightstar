@@ -9,12 +9,14 @@ production model (a seeded validation hold-out of ``--val-fraction`` of each
 disease's genes still drives early stopping, and those pairs are kept as
 message-passing context in the saved model); no benchmark is run for it.
 
+The Model Training page's *Hetero GNN* mode runs the same pipeline
+(``src/models/hetero_pipeline.py``).
+
 Example (from the repo root):
 
     python scripts/train_hetero_disease_model.py --graph full_s800_gwas --json run.json
 """
 import argparse
-import datetime
 import json
 import os
 import sys
@@ -22,15 +24,17 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import torch  # noqa: E402
-
 from src.data.bulk_datasets import DATA_DIR_DEFAULT, BulkDatasetManager  # noqa: E402
-from src.models.hetero_gnn import DECODERS, HeteroGNNLinkPredictor  # noqa: E402
-from src.models.hetero_trainer import NEG_SAMPLING, HeteroTrainConfig, HeteroTrainer  # noqa: E402
-from src.utils.benchmark import HETERO_SCORERS, make_holdout, reference_scorers  # noqa: E402
-from src.utils.discovery import index_disease_genes  # noqa: E402
-from src.utils.hetero_graph_features import TRAIT_CATEGORIES, GENE_GENE, GENE_TRAIT, nx_to_hetero_data  # noqa: E402
-from src.utils.hetero_scorer import HETERO_MODEL_TYPE, align_gene_rows, save_hetero_checkpoint  # noqa: E402
+from src.models.hetero_gnn import DECODERS  # noqa: E402
+from src.models.hetero_pipeline import (  # noqa: E402
+    benchmark_hetero,
+    describe_hetero_params,
+    hetero_model_kwargs,
+    prepare_hetero_training,
+    save_hetero_run,
+    train_hetero,
+)
+from src.models.hetero_trainer import NEG_SAMPLING, HeteroTrainConfig  # noqa: E402
 
 
 def parse_args(argv=None):
@@ -69,84 +73,56 @@ def main(argv=None) -> int:
     if graph is None:
         print(f"Graph {args.graph!r} not found under {args.data_dir}", file=sys.stderr)
         return 1
-    node_list = sorted(graph.nodes())
-    node_to_idx = {n: i for i, n in enumerate(node_list)}
-    index = index_disease_genes(graph, node_list)
 
-    split = None if args.no_holdout else make_holdout(index)
-    hidden = {(g, d) for d, genes in split.hidden.items() for g in genes} if split else set()
     started = time.time()
-    bundle = nx_to_hetero_data(graph, exclude_pairs=hidden, min_trait_genes=args.min_trait_genes)
-    n_string = bundle.data[GENE_GENE].edge_index.size(1) // 2
-    n_assoc = bundle.data[GENE_TRAIT].edge_index.size(1)
-    print(f"{args.graph}: {len(bundle.node_list)} genes, {len(bundle.trait_list)} traits, {n_string} STRING edges, "
-          f"{n_assoc} gene–trait edges after removing {len(hidden)} hidden pairs "
-          f"({len(split.diseases) if split else 0} benchmark diseases); built in {time.time() - started:.0f}s")
+    try:
+        prepared = prepare_hetero_training(graph, holdout=not args.no_holdout, min_trait_genes=args.min_trait_genes)
+    except ValueError as exc:
+        print(f"cannot train on {args.graph!r}: {exc}", file=sys.stderr)
+        return 1
+    split = prepared.split
+    print(f"{args.graph}: {len(prepared.bundle.node_list)} genes, {len(prepared.bundle.trait_list)} traits, "
+          f"{prepared.n_string} STRING edges, {prepared.n_assoc} gene–trait edges after removing "
+          f"{prepared.n_hidden} hidden pairs ({len(split.diseases) if split else 0} benchmark diseases); "
+          f"built in {time.time() - started:.0f}s")
 
-    torch.manual_seed(args.seed)
-    model_kwargs = dict(gene_in=bundle.data["gene"].x.size(1), num_traits=len(bundle.trait_list),
-                        trait_in=len(TRAIT_CATEGORIES), hidden_channels=args.hidden, num_layers=args.layers,
-                        dropout=args.dropout, decoder=args.decoder)
-    model = HeteroGNNLinkPredictor(**model_kwargs)
+    model_kwargs = hetero_model_kwargs(prepared.bundle, hidden=args.hidden, layers=args.layers,
+                                       dropout=args.dropout, decoder=args.decoder)
     config = HeteroTrainConfig(epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
                                supervision_ratio=args.supervision_ratio, neg_gene=args.neg_gene,
                                neg_trait=args.neg_trait, neg_sampling=args.neg_sampling,
                                val_fraction=args.val_fraction, patience=args.patience, eval_every=args.eval_every,
                                seed=args.seed, device=args.device)
-    print(f"model: {sum(p.numel() for p in model.parameters()):,} parameters, decoder={args.decoder}; config: {config}")
+    print(f"decoder={args.decoder}; config: {config}")
 
-    started = time.time()
-    trainer = HeteroTrainer(model, config)
-    history = trainer.train(bundle, index, split, graph)
-    best = history["best_epoch"]
-    metrics = {
-        "epochs_run": len(history["train_loss"]),
-        "best_epoch": best,
-        "val_mrr": history["val_mrr"][best],
-        "val_recall50": history["val_recall50"][best],
-        "val_auc": history["val_auc"][best],
-        "train_minutes": round((time.time() - started) / 60, 2),
-    }
-    print(f"trained {metrics['epochs_run']} epochs in {metrics['train_minutes']} min; best epoch {best}: "
-          f"val MRR {metrics['val_mrr']:.4f}, val recall@50 {metrics['val_recall50']:.4f}, val AUC {metrics['val_auc']:.4f}")
+    trained = train_hetero(prepared.bundle, prepared.index, split, model_kwargs, config)
+    metrics = trained.metrics
+    print(f"model: {sum(p.numel() for p in trained.model.parameters()):,} parameters; trained {metrics['epochs_run']} "
+          f"epochs in {metrics['train_minutes']} min; best epoch {metrics['best_epoch']}: val MRR {metrics['val_mrr']:.4f}, "
+          f"val recall@50 {metrics['val_recall50']:.4f}, val AUC {metrics['val_auc']:.4f}")
 
-    results = {}
-    if split is not None:
-        hetero_scores = align_gene_rows(trainer.score_matrix(split.diseases), bundle.node_list, node_list)
-        results = reference_scorers(["enrichment", *HETERO_SCORERS], graph, node_list, node_to_idx, index, split,
-                                    hetero_scores=hetero_scores)
+    results = benchmark_hetero(trained.model, prepared, graph)
+    metrics_out = dict(metrics)
+    if results:
         width = max(len(n) for n in results)
         for name, result in results.items():
             print(f"{name:{width}s}  {result.summary()}")
-        metrics["benchmark"] = {name: result.to_dict() for name, result in results.items()}
+        metrics_out["benchmark"] = {name: result.to_dict() for name, result in results.items()}
 
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_name = f"hetero_gnn_{stamp}"
-    out = args.out or os.path.join(args.data_dir, "trained_models", f"{model_name}_checkpoint.pt")
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    save_hetero_checkpoint(out, model=model, model_kwargs=model_kwargs, bundle=bundle, split=split, config=config,
-                           metrics=metrics, graph_name=args.graph, min_trait_genes=args.min_trait_genes)
-    print(f"checkpoint: {out}")
-
-    run_id = None
-    if not args.no_save_run:
-        params = (f"hidden={args.hidden}, layers={args.layers}, decoder={args.decoder}, dropout={args.dropout}, "
-                  f"neg={args.neg_gene}g+{args.neg_trait}t/{args.neg_sampling}, lr={args.lr}, wd={args.weight_decay}, "
-                  f"epochs={args.epochs}, seed={args.seed}, holdout={'no' if args.no_holdout else 'benchmark'}")
-        bench = metrics.get("benchmark", {}).get("hetero", {})
-        run_id = manager.save_training_run(
-            model_type=HETERO_MODEL_TYPE, parameters=params, graph_name=args.graph,
-            nodes=len(bundle.node_list), edges=n_string, features=bundle.data["gene"].x.size(1),
-            epochs_run=metrics["epochs_run"], auc_roc=metrics["val_auc"],
-            avg_precision=bench.get("recall@50", metrics["val_recall50"]),
-            model=model.cpu(), model_name=model_name,
-        )
-        print(f"training run #{run_id} recorded (AUC column = validation AUC, precision column = benchmark recall@50)")
+    params = describe_hetero_params(model_kwargs, config, holdout=not args.no_holdout)
+    saved = save_hetero_run(manager, model=trained.model, model_kwargs=model_kwargs, prepared=prepared, config=config,
+                            metrics=metrics, benchmark=results, graph_name=args.graph,
+                            min_trait_genes=args.min_trait_genes, params=params, out=args.out,
+                            save_run=not args.no_save_run)
+    print(f"checkpoint: {saved.checkpoint_path}")
+    if saved.run_id is not None:
+        print(f"training run #{saved.run_id} recorded (AUC column = validation AUC, "
+              f"precision column = benchmark recall@50)")
 
     if args.json:
         with open(args.json, "w") as handle:
-            json.dump({"args": vars(args), "checkpoint": out, "run_id": run_id, "metrics": metrics,
-                       "history": history}, handle, indent=2)
+            json.dump({"args": vars(args), "checkpoint": saved.checkpoint_path, "run_id": saved.run_id,
+                       "metrics": metrics_out, "history": trained.history}, handle, indent=2)
         print(f"wrote {args.json}")
     return 0
 
