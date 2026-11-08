@@ -84,9 +84,11 @@ def test_min_trait_genes_drops_small_traits():
     assert bundle.data["trait"].x.shape[0] == 1
 
 
-def test_min_trait_genes_counts_genes_after_exclusion():
+def test_min_trait_genes_counts_genes_on_the_full_graph_before_exclusion():
+    # the trait node set must not depend on which pairs are hidden
     bundle = nx_to_hetero_data(make_graph(), exclude_pairs={("A", "Asthma")}, min_trait_genes=2)
-    assert bundle.trait_list == []
+    assert bundle.trait_list == ["Asthma"]
+    assert bundle.data[GENE].edge_index.shape == (2, 1)
 
 
 def test_trait_list_argument_enforces_order_and_rejects_mismatch():

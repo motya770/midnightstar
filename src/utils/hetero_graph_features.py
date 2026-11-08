@@ -70,24 +70,25 @@ def nx_to_hetero_data(G, *, exclude_pairs=None, min_trait_genes: int = 1,
     node_list = sorted(n for n in G.nodes() if G.nodes[n].get("node_type") == "gene")
     node_to_idx = {n: i for i, n in enumerate(node_list)}
 
-    # (gene, trait) -> (best score, category); category from the first sighting
-    associations: dict[tuple[str, str], float] = {}
+    # (gene, trait) -> best score; category from the first sighting. Genes per trait are
+    # counted on the full graph, before exclusion, so the trait node set does not depend on
+    # which pairs are hidden (honest and production rebuilds of a checkpoint's graph agree).
+    all_pairs: dict[tuple[str, str], float] = {}
     trait_category: dict[str, str] = {}
     for gene in node_list:
         for category, entries in G.nodes[gene].get("gwas", {}).items():
             for entry in entries:
                 trait = entry["trait"]
-                if (gene, trait) in exclude:
-                    continue
                 trait_category.setdefault(trait, category if category in TRAIT_CATEGORIES else "other")
                 key = (gene, trait)
-                if entry["score"] > associations.get(key, float("-inf")):
-                    associations[key] = entry["score"]
+                if entry["score"] > all_pairs.get(key, float("-inf")):
+                    all_pairs[key] = entry["score"]
 
     genes_per_trait: dict[str, int] = {}
-    for (_, trait) in associations:
+    for (_, trait) in all_pairs:
         genes_per_trait[trait] = genes_per_trait.get(trait, 0) + 1
     kept = {t for t, c in genes_per_trait.items() if c >= min_trait_genes}
+    associations = {pair: score for pair, score in all_pairs.items() if pair not in exclude}
     if trait_list is None:
         trait_list = sorted(kept)
     elif set(trait_list) != kept:
